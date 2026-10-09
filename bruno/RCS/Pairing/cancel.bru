@@ -1,0 +1,18 @@
+meta {
+  name: cancel pairing
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/internal/rcs/pair/cancel
+  body: none
+  auth: none
+}
+
+docs {
+  Abandons the running pairing attempt and drops its in-memory client.
+
+  Worth calling if you started a QR attempt and want to switch to the HAR path,
+  rather than waiting out the 10-minute window.
+}

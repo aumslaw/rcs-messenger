@@ -1,0 +1,42 @@
+meta {
+  name: refresh with HAR
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseUrl}}/internal/rcs/pair/refresh
+  body: none
+  auth: none
+}
+
+docs {
+  Re-authenticates a phone that is **already paired**, using fresh cookies. No
+  emoji to tap, no re-pairing, and the phone does not have to do anything.
+
+  This is the recurring chore for phones paired by HAR. The symptom that you
+  need it: `health` shows `connected: false` with a `lastError` mentioning HTTP
+  401, and the health monitor logs that the Google session has expired and
+  needs a refresh.
+
+  Same upload shape as `pair with HAR` — the .har as the raw body:
+
+  ```
+  curl -X POST http://localhost:8080/internal/rcs/pair/refresh \
+       --data-binary "@fresh.har"
+  ```
+
+  The cookies must belong to the **same Google account** the phone is paired to.
+  A mismatch is rejected rather than silently re-pairing to the wrong account.
+
+  On success the stored session is updated and the phone reconnects on its own.
+  Nothing needs restarting.
+
+  **Phones paired by QR never need this.** If you find yourself running it
+  daily, it is worth re-checking whether that handset offers a QR scanner, since
+  that removes the chore entirely.
+
+  Errors:
+  - 400 — no session stored yet, so pair first rather than refresh
+  - 400 — bad or expired cookies, or cookies for a different Google account
+}

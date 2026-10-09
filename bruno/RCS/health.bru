@@ -1,0 +1,64 @@
+meta {
+  name: health
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/internal/rcs/health
+  body: none
+  auth: none
+}
+
+docs {
+  Whether the paired phone is currently able to send.
+
+  The service talks to the phone itself — there is no separate sender process.
+  It holds a Google Messages web session for a phone paired through
+  `Pairing / page`, and that session lives in the `rcs_sessions` table so it
+  survives restarts.
+
+  ```
+  curl http://localhost:8080/internal/rcs/health
+  ```
+
+  ## Reading the response
+
+  ```json
+  {
+    "success": true,
+    "data": {
+      "ready": true,
+      "sender": {
+        "loggedIn": true,
+        "connected": true,
+        "phoneResponding": true,
+        "sessionActive": true,
+        "sims": [{ "carrier": "AT&T", "number": "...", "rcsEnabled": true }],
+        "lastError": ""
+      }
+    }
+  }
+  ```
+
+  `ready` is the only field worth gating on. It is true when every one of
+  `loggedIn`, `connected`, `phoneResponding`, `sessionActive` holds **and** at
+  least one SIM has `rcsEnabled`. Anything else means sends will be refused.
+
+  What each false value usually means:
+
+  - `loggedIn` false — no phone is paired at all, or the pairing was revoked
+  - `connected` false — check `lastError`; an HTTP 401 there means the Google
+    session expired and needs `Pairing / refresh with HAR`
+  - `sessionActive` false — somebody opened messages.google.com/web on the same
+    Google account and took the session
+  - `phoneResponding` false — the handset is off, offline or asleep
+  - no SIM with `rcsEnabled` — RCS / chat features were turned off on the phone
+
+  The health monitor polls this internally and logs (or alerts, if an announcer
+  is wired in) when it flips, once per transition rather than once per poll. You do not
+  need to watch this endpoint yourself.
+
+  Errors:
+  - 503 — `rcs.enabled` is false in config, so the subsystem is off entirely
+}

@@ -1,0 +1,91 @@
+meta {
+  name: send
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/internal/rcs/send
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "to": "+15551234567",
+    "message": "Hi, this is a test message."
+  }
+}
+
+docs {
+  Sends one message over RCS and waits for the phone to confirm delivery.
+
+  **It never falls back to SMS.** If the recipient cannot take RCS the send is
+  refused with 409 and nothing goes out — no silent carrier charges, no green
+  bubble.
+
+  Encryption is verified after the fact rather than demanded up front (with
+  `rcs.require_e2ee` false, the default). A chat the phone has not finalized
+  yet is sent to, because the send is what finalizes it; the chat is then
+  re-read and the result recorded per number (see `send results`). A number
+  whose message turned out to go as RCS without encryption is never auto-sent
+  to again, and a chat the phone already records as unencrypted is refused.
+
+  ```json
+  {
+    "success": true,
+    "message": "sent",
+    "data": {
+      "to": "+15551234567",
+      "sent": true,
+      "transport": "RCS",
+      "outcome": "SUCCESS_E2EE",
+      "finalStatus": "OUTGOING_DELIVERED",
+      "messageId": "1050",
+      "check": { "e2ee": "unknown", "e2eeCapability": "yes", "...": "" },
+      "after": { "e2ee": "on", "...": "" }
+    }
+  }
+  ```
+
+  `transport` is derived from the phone's own message type: **4 is RCS, 1 is
+  SMS**. It should always read RCS here; anything else means the guarantee
+  above did not hold and is recorded as `SUCCESS_SMS`. `outcome` is the
+  verdict — `SUCCESS_E2EE`, `SUCCESS_RCS`, `SUCCESS_SMS` or
+  `SUCCESS_UNVERIFIED`, see `send results` — `check` is what eligibility saw
+  before the send and `after` is the chat re-read once the message was out.
+
+  ## Blocking and timeouts
+
+  This waits up to `rcs.wait_seconds` (default 20, capped at 20 by the server's
+  HTTP write timeout) for the phone to report delivery. Budget for that.
+
+  ## Throughput
+
+  One phone manages a few messages per second. There is no queue and no rate
+  limiting here — the caller owns that. Bursting a consumer Google account can
+  trip anti-abuse and get it limited.
+
+  ## Character set
+
+  Stick to ASCII. Non-ASCII characters are mangled somewhere below our code in
+  the Google Messages layer — an em dash comes out as a replacement character.
+  Accents and emoji are not safe.
+
+  Errors:
+  - 400 — `to` is not E.164, or `message` is empty
+  - 403 — the number is not on `rcs.allowlist_phones` (when that list is set)
+  - 409 — refused, **nothing sent**. The error names the reason:
+    `not_rcs`, `not_e2ee`, `rcs_disabled_on_sim`, `conversation_read_only`,
+    `known_unencrypted` (all permanent; the last is decided here from `send
+    results`, before the phone is asked), or `phone_not_responding`,
+    `session_not_active`, `rcs_pending`, `e2ee_pending` (transient, worth
+    retrying a minute later — `rcs_pending` is a fresh chat the phone has not
+    looked up yet, which reads as SMS until it has; see check eligibility for
+    what `e2ee_pending` means, and note that with `rcs.require_e2ee` false a
+    pending chat is sent to instead of refused). Callers should retry
+    transient refusals themselves.
+  - 503 — rcs disabled, no phone paired, or the send results could not be
+    read (refused rather than risk a number on record)
+  - 502 — the phone could not be reached
+}

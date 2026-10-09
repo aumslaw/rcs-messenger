@@ -1,0 +1,59 @@
+meta {
+  name: thread
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/internal/rcs/thread?to=%2B15551234567&limit=25
+  body: none
+  auth: none
+}
+
+params:query {
+  to: %2B15551234567
+  limit: 25
+}
+
+docs {
+  Recent messages in the conversation with one number, newest first, plus the
+  same eligibility block `check` returns.
+
+  Mostly a debugging tool: it is how you confirm independently that a message
+  really went out as RCS rather than SMS, and how you read what somebody
+  replied.
+
+  **URL-encode the `+`** as `%2B`, or it is parsed as a space and the number
+  fails to normalize.
+
+  ```json
+  {
+    "success": true,
+    "data": {
+      "check": { "...": "same shape as check eligibility" },
+      "messages": [
+        {
+          "messageId": "1050",
+          "timestamp": "2026-09-29T18:59:00Z",
+          "outgoing": true,
+          "status": "OUTGOING_DELIVERED",
+          "type": 4,
+          "transport": "RCS",
+          "e2eeAtSend": "on",
+          "text": "Hi, this is a test message."
+        }
+      ]
+    }
+  }
+  ```
+
+  `type` is the phone's own classification — **4 RCS, 2/3 MMS, 1 SMS** — and
+  `e2eeAtSend` is whether the conversation was encrypted at the moment that
+  message was sent, not now.
+
+  `limit` defaults to 25.
+
+  Errors:
+  - 400 — `to` is missing or not E.164
+  - 503 — rcs disabled, or no phone paired
+}

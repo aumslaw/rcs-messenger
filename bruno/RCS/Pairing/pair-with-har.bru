@@ -1,0 +1,67 @@
+meta {
+  name: pair with HAR (no QR scanner)
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/internal/rcs/pair/cookies
+  body: none
+  auth: none
+}
+
+docs {
+  The fallback for phones whose Google Messages has no **QR code scanner** under
+  Device pairing. Google calls this account pairing, and you confirm by tapping
+  an emoji instead of scanning.
+
+  **Prefer QR whenever the phone offers it.** This path rides on Google account
+  cookies and has to be re-authenticated constantly — see the catch below.
+
+  ## Sending the file
+
+  POST the .har as the **raw request body**. Not multipart, not a form field.
+  In Bruno: Body, then File / Binary.
+
+  ```
+  curl -X POST http://localhost:8080/internal/rcs/pair/cookies \
+       --data-binary "@account.har"
+  ```
+
+  ## Capturing the HAR
+
+  In a browser signed into **only** that phone's Google account, open
+  messages.google.com/web, F12, Network tab, reload the page, then right-click
+  in the request list and choose **Save all as HAR with content**.
+
+  Keep every cookie row, not just the obvious ones. Google's bound-session
+  cookies, `__Secure-1PSIDTS` and friends, have to ride along or the request
+  comes back 401.
+
+  ## Then tap the emoji
+
+  ```json
+  {
+    "success": true,
+    "message": "tap this emoji on the phone",
+    "data": { "emoji": "..." }
+  }
+  ```
+
+  Google Messages on the phone shows a set of emoji, and you tap the one named
+  in the response. You have three minutes. **Have Messages open and the phone
+  online before you POST**, because the handset has to answer in real time.
+
+  ## The catch
+
+  These cookies are close to single-use. Google rotates the bound-session
+  cookies when they are used, so a HAR that has been used once is often dead
+  within hours — we measured about six, not the day the upstream docs suggest.
+  Expect to run `refresh with HAR` roughly daily to keep a phone paired this
+  way. That recurring cost is the reason QR is worth chasing on the handset.
+
+  Errors:
+  - 400 — the body is empty, not a HAR, or missing required cookies
+  - 400 — the cookies are expired, which reads through as a 401 from Google
+  - 400 — no phone found for the account, or the phone did not respond
+}

@@ -1,0 +1,44 @@
+meta {
+  name: pairing page (open in a browser)
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/internal/rcs/pair
+  body: none
+  auth: none
+}
+
+docs {
+  **Open this in a browser, not in Bruno** — it is an HTML page, and Bruno will
+  only show you the markup.
+
+  This is the whole pairing flow in one page: press a button, scan a QR from the
+  phone, watch it confirm. It drives the other requests in this folder for you.
+
+  Open `http://localhost:8080/internal/rcs/pair` in a browser.
+
+  The pairing attempt lives in the server's memory, so every request in the
+  flow has to reach the same running process.
+
+  On the phone: Google Messages → profile menu → **Device pairing** → **QR code
+  scanner**.
+
+  ## What you need
+
+  An Android phone with RCS / chat features ON, powered and online. It does
+  **not** need to be anywhere near the server. The phone talks to Google, we
+  talk to Google, and they meet in the middle — exactly like opening
+  messages.google.com/web on a laptop in another country.
+
+  ## After it says Paired
+
+  The session is written to the `rcs_sessions` table and the phone connects
+  within 30 seconds. It reconnects by itself after a restart or a reschedule,
+  with no human involved.
+
+  A QR pairing does not expire the way the cookie path does, so this is a
+  one-time job. If the phone offers no QR scanner, use `pair with HAR` instead
+  and expect to re-authenticate roughly daily.
+}

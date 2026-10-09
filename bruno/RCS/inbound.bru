@@ -1,0 +1,60 @@
+meta {
+  name: inbound (opt-out)
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/internal/rcs/inbound
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "from": "+15551234567",
+    "text": "STOP"
+  }
+}
+
+docs {
+  Handles a reply that came back from a recipient, and opts them out if it is a
+  STOP.
+
+  **You do not normally call this.** When a phone is paired, incoming messages
+  are delivered to this logic in-process — there is no network hop. This request
+  exists so the opt-out behaviour can be exercised without a real handset.
+
+  ## What counts as an opt-out
+
+  The **whole message** must be one of the standard keywords, after stripping
+  case and punctuation: stop, stopall, stop all, unsubscribe, cancel, end, quit,
+  optout, opt out, revoke.
+
+  So `STOP`, `stop!` and ` Unsubscribe. ` all opt out. `please stop by the
+  store` and `can i cancel my order` do **not**. Substring matching would
+  unsubscribe people who never asked, which is worse than missing one.
+
+  ## What happens on a match
+
+  The number is handed to the configured opt-out store (`rcs.Blocker`), the
+  do-not-text list future sends should respect.
+
+  ```json
+  {
+    "success": true,
+    "message": "opted out",
+    "data": { "from": "+15551234567", "optOut": true, "blocked": true }
+  }
+  ```
+
+  **`blocked` tells you whether the opt-out store actually recorded it.** When
+  no store is configured, which is the default here, the
+  call is skipped and you get `"opt-out seen but not recorded"` with
+  `blocked: false`. Do not read that as suppression having happened — the
+  recipient will still be texted.
+
+  Errors:
+  - 400 — `from` is not E.164
+  - 502 — the opt-out store rejected it or could not be reached
+}

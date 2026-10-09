@@ -1,0 +1,90 @@
+meta {
+  name: check eligibility
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/internal/rcs/check
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "to": "+15551234567"
+  }
+}
+
+docs {
+  Asks whether a number can receive encrypted RCS. **Sends nothing.**
+
+  Use this before `send` when you want to know the answer without committing to
+  a message, or to debug why a send was refused.
+
+  `to` is normalized, so `+1 555-123-4567`, `+1 (555) 123.4567` and
+  `0015551234567` all work. It must resolve to E.164 — a bare 10-digit number
+  is rejected here.
+
+  ```json
+  {
+    "success": true,
+    "data": {
+      "to": "+15551234567",
+      "conversationId": "30",
+      "transport": "RCS",
+      "e2ee": "on",
+      "e2eeEvidence": "TOMBSTONE_PROTOCOL_SWITCH_TO_ENCRYPTED_RCS_INFO",
+      "readOnly": false,
+      "eligible": true
+    }
+  }
+  ```
+
+  `eligible` is the answer. `transport` is what the phone reports for that
+  conversation, and `e2ee` whether it is end-to-end encrypted — with
+  `rcs.require_e2ee` true (the default) a send to a conversation whose `e2ee`
+  is not `on` is refused.
+
+  `e2ee` is read from the newest protocol tombstone in the thread (the grey
+  system lines), named in `e2eeEvidence`. It has three values:
+
+  - `on` — the phone says the chat is encrypted.
+  - `off` — the phone says it is not (`reason: not_e2ee`, permanent).
+  - `unknown` with `reason: e2ee_pending` — the chat is RCS but its only
+    tombstone is `TOMBSTONE_ONE_ON_ONE_SMS_CREATED`. A chat created from this
+    session is written down as SMS before the phone has looked the contact up;
+    the type flips to RCS within seconds, but that tombstone is only rewritten
+    in place (to `TOMBSTONE_ENCRYPTED_ONE_ON_ONE_RCS_CREATED`) when the phone
+    next finalizes the chat, which has taken hours unless the thread is opened
+    on the handset or a message is sent to it. This refusal is **retryable**:
+    check again later, and see `e2eeCapable` for what a send would become.
+
+  `e2eeCapability` is what the phone's own capability lookup says about the
+  contact, decoded from `GET_CONVERSATION_TYPE`'s unnamed field 8 (the raw
+  parts are in `conversationTypeProbe.capability`):
+
+  - `yes` — the lookup found encrypted RCS. Every chat seen with this and then
+    sent to or opened finalized as encrypted, so a send to a pending chat that
+    reads `yes` goes out encrypted.
+  - `not_yet` — nothing recorded. The probe itself starts the lookup, and a
+    Google Messages contact reads `yes` on a check a minute later with nothing
+    else done. An iPhone on RCS keeps reading `not_yet`, so it is also what
+    "no encrypted RCS" looks like: check again before concluding either way.
+  - `no` — a recorded lookup without encrypted RCS (seen on an SMS-only
+    contact).
+
+  The lookup does not finalize the chat: `e2ee` stays `unknown` until the
+  thread is opened on the handset or sent to. The field is absent when the
+  probe failed. The rest of `conversationTypeProbe`, and `conversationFields`
+  for the conversation record, are raw dumps kept for comparing chats; `type`
+  there only mirrors RCS (2) vs SMS (1).
+
+  Opening a conversation is a real call to the phone, so this takes a second or
+  two and needs the phone online.
+
+  Errors:
+  - 400 — `to` is not E.164
+  - 503 — rcs disabled, or no phone paired
+  - 502 — the phone could not be reached
+}

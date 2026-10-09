@@ -1,0 +1,6 @@
+{
+  "version": "1",
+  "name": "rcs-messenger",
+  "type": "collection",
+  "ignore": ["node_modules", ".git"]
+}

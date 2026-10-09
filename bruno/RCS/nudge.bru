@@ -1,0 +1,73 @@
+meta {
+  name: nudge (experiment)
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/internal/rcs/nudge
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "to": "+15551234567",
+    "action": "get_conversation"
+  }
+}
+
+docs {
+  An experiment, not a feature. Fires one of the calls the Messages web client
+  makes when a thread is opened, against a chat the phone has not finalized
+  (`check eligibility` says `e2ee_pending`), and runs the check before and
+  after so the answer is in the response.
+
+  Why: opening the thread on the handset makes the phone rewrite the
+  created-tombstone to the encrypted variant within a minute, and until that
+  happens the chat is refused. `GET_CONVERSATION_TYPE`, which every check
+  already makes, does not do it (tested 2026-09-30). These are the remaining
+  candidates:
+
+  - `get_conversation` — GET_CONVERSATION. Also dumps the conversation
+    record's unnamed fields into `steps[].result`.
+  - `mark_read` — MESSAGE_READ on the chat's latest message.
+  - `typing` — TYPING_UPDATES. The recipient may see "typing…" for a moment.
+  - `all` — the three above in that order, then one after-check.
+
+  Try them one at a time on a pending chat, without touching the phone, and
+  read `changed`: true means the tombstone evidence moved between `before`
+  and `after`. The after-check waits two seconds; if a nudge works slowly,
+  run `check eligibility` again a minute later.
+
+  **Result, 2026-09-30:** none of the three changed anything on a pending
+  chat, checked again minutes later; opening the thread on the handset then
+  flipped it within a minute. The conversation record's field 39 and the type
+  probe's field 8 are the same nested message (a few flags and a millisecond
+  clock) and read identically for pending and encrypted chats, so neither is
+  an encryption signal. The web session cannot do what a tap does. This
+  endpoint stays as a diagnostic.
+
+  ```json
+  {
+    "success": true,
+    "message": "no change",
+    "data": {
+      "to": "+15551234567",
+      "conversationId": "24",
+      "before": { "e2ee": "unknown", "reason": "e2ee_pending", "...": "" },
+      "steps": [
+        { "action": "get_conversation", "result": ["status = ...", "subType = false", "conversation.field30 = 1"] }
+      ],
+      "after": { "e2ee": "unknown", "reason": "e2ee_pending", "...": "" },
+      "changed": false
+    }
+  }
+  ```
+
+  Errors:
+  - 400 — `to` is not E.164, or `action` is not one of the above
+  - 501 — the configured sender cannot nudge (only the in-process phone can)
+  - 503 — rcs disabled, or no phone paired
+  - 502 — the phone could not be reached
+}

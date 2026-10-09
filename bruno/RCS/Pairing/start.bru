@@ -1,0 +1,28 @@
+meta {
+  name: start QR pairing
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/internal/rcs/pair/start
+  body: none
+  auth: none
+}
+
+docs {
+  Begins a QR pairing attempt. The page drives this for you; call it directly
+  only if you are scripting.
+
+  It takes a few seconds, because it fetches Google config and opens a login
+  session before it can produce a code.
+
+  Then fetch `QR code` and scan it. The code is regenerated every 30 seconds
+  server-side for up to 10 minutes, after which the attempt gives up.
+
+  Only one attempt runs at a time, and it lives in the memory of the server process
+  that served this request. Every following request must reach the same process.
+
+  Errors:
+  - 400 — an attempt is already running, or Google refused to start one
+}

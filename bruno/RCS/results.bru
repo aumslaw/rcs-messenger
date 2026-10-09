@@ -1,0 +1,67 @@
+meta {
+  name: send results
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{baseUrl}}/internal/rcs/results?to=%2B15551234567&limit=50
+  body: none
+  auth: none
+}
+
+params:query {
+  to: %2B15551234567
+  limit: 50
+}
+
+docs {
+  What happened to past sends, newest first. Every attempt is a row, refusals
+  included. Leave `to` out for the latest across all numbers.
+
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "id": 12,
+        "phone": "+15551234567",
+        "conversationId": "29",
+        "messageId": "42",
+        "outcome": "SUCCESS_E2EE",
+        "status": "OUTGOING_DELIVERED",
+        "transport": "RCS",
+        "e2eeBefore": "unknown",
+        "e2eeAfter": "on",
+        "e2eeEvidence": "TOMBSTONE_ENCRYPTED_ONE_ON_ONE_RCS_CREATED",
+        "capability": "yes",
+        "createdAt": 1790791735000
+      }
+    ]
+  }
+  ```
+
+  `outcome` is the point of the table:
+
+  - `SUCCESS_E2EE` — delivered, and the chat finalized encrypted.
+  - `SUCCESS_RCS` — delivered as RCS, but the chat finalized without
+    encryption (an iPhone, or another non-Google client). **This number is
+    never auto-sent to again**; a later send is refused as `known_unencrypted`.
+  - `SUCCESS_SMS` — delivered, but the phone fell back to SMS/MMS. Should not
+    happen with the RCS-only send; treated like `SUCCESS_RCS`.
+  - `SUCCESS_UNVERIFIED` — delivered as RCS, but the chat could not be re-read
+    in time to say which. Rare; does not block the number.
+  - `FAILED` — refused (`status` is the reason) or the phone reported a
+    failure (`status` is the phone's status).
+
+  `e2eeBefore`/`capability` are what the eligibility check saw before the send;
+  `e2eeAfter`/`e2eeEvidence` are the chat re-read once the message was out.
+  Sending is what makes the phone finalize a new chat, so `before` is often
+  `unknown` and `after` is the answer.
+
+  `limit` defaults to 50, max 500. **URL-encode the `+`** as `%2B`.
+
+  Errors:
+  - 400 — `to` is present but not E.164
+  - 503 — rcs disabled, or no results store
+}

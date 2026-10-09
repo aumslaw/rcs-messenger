@@ -1,0 +1,33 @@
+meta {
+  name: pairing status
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/internal/rcs/pair/status
+  body: none
+  auth: none
+}
+
+docs {
+  How the current pairing attempt is going. The page polls this every 2 seconds.
+
+  ```json
+  {
+    "success": true,
+    "data": {
+      "running": true,
+      "paired": false,
+      "done": false,
+      "phone": "",
+      "error": ""
+    }
+  }
+  ```
+
+  `done` with `paired` false means it failed, and `error` says why — usually the
+  QR was not scanned inside the 10-minute window.
+
+  All-false means no attempt has been started on this server.
+}

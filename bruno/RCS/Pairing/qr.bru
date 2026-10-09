@@ -1,0 +1,26 @@
+meta {
+  name: QR code (PNG)
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/internal/rcs/pair/qr
+  body: none
+  auth: none
+}
+
+docs {
+  The current pairing QR as a PNG. Open it in a browser and scan it from Google
+  Messages, Device pairing, QR code scanner.
+
+  It rotates every 30 seconds, so refresh if it has been sitting a while.
+  Requires `start QR pairing` to have been called first, on the same running server.
+
+  **Treat this image as a secret.** It embeds the session encryption keys, so
+  anyone who sees it can pair as that phone. Never paste it into a ticket, a
+  chat or a log.
+
+  Errors:
+  - 400 — no attempt is running, or it already finished
+}
