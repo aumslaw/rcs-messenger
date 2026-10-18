@@ -12,11 +12,11 @@ import (
 
 // Outcome is how a send attempt ended, recorded per number.
 //
-// The policy behind it: a message may go to a chat the phone has not
-// finalized yet, because the send is what finalizes it. Afterwards the chat
-// is re-read and the truth is written down. the caller hears "sent" whenever a
-// message went out, whichever kind; a number that turned out to take RCS
-// without encryption is simply never auto-sent to again.
+// The policy behind it: a message is sent only when encryption was confirmed
+// before the send. Afterwards the chat is re-read as a check on that
+// confirmation. If the check disagrees (the message went out unencrypted or as
+// SMS) the pre-send evidence was wrong: it is recorded loudly and the number is
+// never auto-sent to again.
 type Outcome string
 
 const (
@@ -25,6 +25,7 @@ const (
 	OutcomeSuccessRCS  Outcome = "SUCCESS_RCS"        // delivered as RCS, chat finalized unencrypted: never again
 	OutcomeSuccessSMS  Outcome = "SUCCESS_SMS"        // delivered, but the phone fell back to SMS/MMS: never again
 	OutcomeUnverified  Outcome = "SUCCESS_UNVERIFIED" // delivered as RCS, the chat could not be re-read in time
+	OutcomeOptedOut    Outcome = "OPTED_OUT"          // the number replied STOP or similar: never again
 )
 
 // Blocks reports whether a number with this outcome on record is one we do
@@ -109,6 +110,32 @@ func fillBefore(r *SendRecord, c *rcsdirect.Check) {
 	if r.E2EEEvidence == "" {
 		r.E2EEEvidence = c.E2EEEvidence
 	}
+}
+
+// BlockNumber records that phone opted out, so it is never sent to again.
+// It makes ResultStore a Blocker. Recording twice is harmless.
+func (s *ResultStore) BlockNumber(ctx context.Context, phone, reason string) (bool, error) {
+	if err := s.Record(ctx, SendRecord{
+		Phone: phone, Outcome: OutcomeOptedOut, Status: ReasonOptedOut, Detail: reason,
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// OptedOut reports whether phone has replied STOP or similar.
+func (s *ResultStore) OptedOut(ctx context.Context, phone string) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, errors.New("no database to read rcs send results from")
+	}
+	var out bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM rcs_send_results WHERE phone = $1 AND outcome = $2)`,
+		phone, string(OutcomeOptedOut)).Scan(&out)
+	if err != nil {
+		return false, fmt.Errorf("checking rcs opt-outs: %w", err)
+	}
+	return out, nil
 }
 
 // ResultStore keeps send outcomes in the rcs_send_results table.

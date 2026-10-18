@@ -42,9 +42,10 @@ docs {
   ```
 
   `eligible` is the answer. `transport` is what the phone reports for that
-  conversation, and `e2ee` whether it is end-to-end encrypted — with
-  `rcs.require_e2ee` true (the default) a send to a conversation whose `e2ee`
-  is not `on` is refused.
+  conversation, and `e2ee` whether it is end-to-end encrypted. A send is only
+  ever allowed when encryption is confirmed: `e2ee` is `on`, or the chat is
+  still the phone's unfinalized first draft and `e2eeCapability` is `yes`.
+  Everything else is refused.
 
   `e2ee` is read from the newest protocol tombstone in the thread (the grey
   system lines), named in `e2eeEvidence`. It has three values:

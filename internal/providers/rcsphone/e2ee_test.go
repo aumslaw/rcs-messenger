@@ -58,38 +58,38 @@ func rcsCheck() *CheckResult {
 	}
 }
 
-func TestEligibilityDistinguishesPendingFromOff(t *testing.T) {
-	pending := rcsCheck()
-	pending.E2EE, pending.e2eePending = e2eeUnknown, true
-	if ok, reason := eligibility(pending, true); ok || reason != ErrE2EEPending.Error() {
-		t.Errorf("pending: got ok=%v reason=%q, want e2ee_pending", ok, reason)
+// Every combination of what the phone can tell us, and whether a send is
+// allowed. There is exactly one rule: a send needs positive evidence of
+// encryption, and every unclear case is a refusal.
+func TestEligibilityRequiresConfirmedEncryption(t *testing.T) {
+	cases := []struct {
+		name       string
+		e2ee       e2eeState
+		pending    bool
+		capability CapabilityState
+		wantOK     bool
+		wantReason string
+	}{
+		{"encrypted tombstone", e2eeOn, false, "", true, ""},
+		{"encrypted tombstone, capability not recorded", e2eeOn, false, CapabilityNotYet, true, ""},
+		{"unencrypted tombstone", e2eeOff, false, "", false, ErrNotE2EE.Error()},
+		{"unencrypted tombstone even though capability says yes", e2eeOff, false, CapabilityYes, false, ErrNotE2EE.Error()},
+		{"no tombstone in reach", e2eeUnknown, false, "", false, ErrNotE2EE.Error()},
+		{"no tombstone in reach even though capability says yes", e2eeUnknown, false, CapabilityYes, false, ErrNotE2EE.Error()},
+		{"first draft, capability yes", e2eeUnknown, true, CapabilityYes, true, ""},
+		{"first draft, lookup not landed (also what an iPhone reads)", e2eeUnknown, true, CapabilityNotYet, false, ErrE2EEPending.Error()},
+		{"first draft, probe failed so no capability", e2eeUnknown, true, "", false, ErrE2EEPending.Error()},
+		{"first draft, capability no", e2eeUnknown, true, CapabilityNo, false, ErrNotE2EE.Error()},
 	}
-	if ok, reason := eligibility(pending, false); !ok {
-		t.Errorf("without require_e2ee a pending chat is an RCS chat, refused with %q", reason)
-	}
-
-	off := rcsCheck()
-	off.E2EE = e2eeOff
-	if ok, reason := eligibility(off, true); ok || reason != ErrNotE2EE.Error() {
-		t.Errorf("off: got ok=%v reason=%q, want not_e2ee", ok, reason)
-	}
-	if ok, reason := eligibility(off, false); ok || reason != ErrNotE2EE.Error() {
-		t.Errorf("off without the mandate: got ok=%v reason=%q, want not_e2ee, the phone's own record says unencrypted", ok, reason)
-	}
-
-	unknown := rcsCheck()
-	unknown.E2EE = e2eeUnknown
-	if ok, reason := eligibility(unknown, true); ok || reason != ErrNotE2EE.Error() {
-		t.Errorf("unknown with no tombstone at all: got ok=%v reason=%q, want not_e2ee", ok, reason)
-	}
-	if ok, reason := eligibility(unknown, false); !ok {
-		t.Errorf("unknown without the mandate is sent to and verified afterwards, refused with %q", reason)
-	}
-
-	on := rcsCheck()
-	on.E2EE = e2eeOn
-	if ok, reason := eligibility(on, true); !ok {
-		t.Errorf("on: refused with %q", reason)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := rcsCheck()
+			c.E2EE, c.e2eePending, c.E2EECapability = tc.e2ee, tc.pending, tc.capability
+			ok, reason := eligibility(c)
+			if ok != tc.wantOK || reason != tc.wantReason {
+				t.Errorf("got ok=%v reason=%q, want ok=%v reason=%q", ok, reason, tc.wantOK, tc.wantReason)
+			}
+		})
 	}
 }
 
@@ -99,7 +99,7 @@ func TestAFreshChatReadingSMSIsPendingNotRefused(t *testing.T) {
 	fresh.E2EE = e2eeOff
 	fresh.E2EEEvidence = gmproto.MessageStatusType_TOMBSTONE_ONE_ON_ONE_SMS_CREATED.String()
 	fresh.E2EECapability = CapabilityNotYet
-	if ok, reason := eligibility(fresh, false); ok || reason != ErrRCSPending.Error() {
+	if ok, reason := eligibility(fresh); ok || reason != ErrRCSPending.Error() {
 		t.Errorf("SMS with no lookup recorded: got ok=%v reason=%q, want rcs_pending", ok, reason)
 	}
 	if !settles(ErrRCSPending.Error()) {
@@ -111,14 +111,14 @@ func TestAFreshChatReadingSMSIsPendingNotRefused(t *testing.T) {
 	lookedUp.E2EE = e2eeOff
 	lookedUp.E2EEEvidence = gmproto.MessageStatusType_TOMBSTONE_ONE_ON_ONE_SMS_CREATED.String()
 	lookedUp.E2EECapability = CapabilityNo
-	if ok, reason := eligibility(lookedUp, false); ok || reason != ErrNotRCS.Error() {
+	if ok, reason := eligibility(lookedUp); ok || reason != ErrNotRCS.Error() {
 		t.Errorf("SMS with the lookup done: got ok=%v reason=%q, want not_rcs", ok, reason)
 	}
 
 	oldSMS := rcsCheck()
 	oldSMS.conv.Type = gmproto.ConversationType_SMS
 	oldSMS.E2EE = e2eeUnknown
-	if ok, reason := eligibility(oldSMS, false); ok || reason != ErrNotRCS.Error() {
+	if ok, reason := eligibility(oldSMS); ok || reason != ErrNotRCS.Error() {
 		t.Errorf("an SMS chat with no created-tombstone in reach: got ok=%v reason=%q, want not_rcs", ok, reason)
 	}
 }

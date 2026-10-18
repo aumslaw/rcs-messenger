@@ -17,11 +17,10 @@ var ErrBadNumber = errors.New("number must be E.164, e.g. +15551234567")
 var e164 = regexp.MustCompile(`^\+[1-9][0-9]{6,14}$`)
 
 type Config struct {
-	Enabled     bool
-	RequireE2EE bool
-	Wait        time.Duration
-	DryRun      bool
-	Allowlist   []string
+	Enabled   bool
+	Wait      time.Duration
+	DryRun    bool
+	Allowlist []string
 }
 
 type sender interface {
@@ -98,6 +97,18 @@ func (s *Service) Send(ctx context.Context, rawTo, message string) (*Result, err
 		return nil, emptyMessageErr()
 	}
 
+	if out, err := s.optedOut(ctx, to); err != nil {
+		return nil, err
+	} else if out {
+		logg.Info().Str("to", to).Msg("RCS send refused, this number opted out")
+		s.record(ctx, SendRecord{
+			Phone: to, Outcome: OutcomeFailed, Status: ReasonOptedOut,
+			Detail: "refused, nothing sent: the number replied STOP or similar",
+		})
+		refused := &rcsdirect.RefusedError{Reason: ReasonOptedOut}
+		return nil, refusedErr(refused, ReasonOptedOut, false)
+	}
+
 	if blocked, err := s.knownUnencrypted(ctx, to); err != nil {
 		return nil, err
 	} else if blocked {
@@ -117,7 +128,9 @@ func (s *Service) Send(ctx context.Context, rawTo, message string) (*Result, err
 		return &Result{To: to, DryRun: true, Transport: "none"}, nil
 	}
 
-	requireE2EE := s.cfg.RequireE2EE
+	// Encryption is never optional. The phone-side sender ignores this flag
+	// and enforces it regardless; it is set so a remote sender does too.
+	requireE2EE := true
 	out, err := s.client.Send(ctx, to, message, rcsdirect.SendOptions{
 		RequireE2EE: &requireE2EE,
 		Wait:        s.cfg.Wait,
@@ -143,7 +156,9 @@ func (s *Service) Send(ctx context.Context, rawTo, message string) (*Result, err
 
 	evt := logg.Info()
 	if outcome.Blocks() {
-		evt = logg.Warn()
+		// The gate said encrypted and the phone says otherwise. The message
+		// cannot be recalled, so this must be impossible to miss.
+		evt = logg.Error()
 	}
 	evt.
 		Str("to", to).
@@ -164,6 +179,27 @@ func (s *Service) Send(ctx context.Context, rawTo, message string) (*Result, err
 		Check:       out.Check,
 		After:       out.After,
 	}, nil
+}
+
+// optOutChecker is optional: only a results store that also tracks opt-outs
+// can answer it.
+type optOutChecker interface {
+	OptedOut(ctx context.Context, phone string) (bool, error)
+}
+
+// optedOut asks the results whether this number replied STOP. A store that
+// cannot answer fails closed, like knownUnencrypted.
+func (s *Service) optedOut(ctx context.Context, to string) (bool, error) {
+	c, ok := s.results.(optOutChecker)
+	if !ok {
+		return false, nil
+	}
+	out, err := c.OptedOut(ctx, to)
+	if err != nil {
+		logg.Error().Err(err).Str("to", to).Msg("RCS opt-outs could not be read, refusing")
+		return false, resultsErr(err)
+	}
+	return out, nil
 }
 
 // knownUnencrypted asks the results whether a past send to this number went
