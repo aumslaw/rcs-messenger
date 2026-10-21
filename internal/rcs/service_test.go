@@ -57,7 +57,7 @@ func code(t *testing.T, err error) apperr.Code {
 
 func TestSendHappyPath(t *testing.T) {
 	f := &fakeSender{enabled: true}
-	s := NewService(f, Config{Enabled: true, RequireE2EE: true, Wait: 20 * time.Second})
+	s := NewService(f, Config{Enabled: true, Wait: 20 * time.Second})
 
 	_, err := s.Send(context.Background(), "(555) 123-4567", "hello")
 	if err == nil {
@@ -161,7 +161,7 @@ func TestEmptyMessageRejected(t *testing.T) {
 
 func TestRefusalKeepsTheReasonAndCause(t *testing.T) {
 	cause := &rcsdirect.RefusedError{Reason: "not_e2ee", Check: &rcsdirect.Check{To: "+15551234567"}}
-	s := NewService(&fakeSender{enabled: true, err: cause}, Config{Enabled: true, RequireE2EE: true})
+	s := NewService(&fakeSender{enabled: true, err: cause}, Config{Enabled: true})
 
 	_, err := s.Send(context.Background(), "+15551234567", "hi")
 	if code(t, err) != CodeRefused {

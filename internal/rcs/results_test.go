@@ -10,9 +10,17 @@ import (
 )
 
 type fakeResults struct {
-	records []SendRecord
-	blocked map[string]bool
-	err     error
+	records  []SendRecord
+	blocked  map[string]bool
+	optedOut map[string]bool
+	err      error
+}
+
+func (f *fakeResults) OptedOut(_ context.Context, phone string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	return f.optedOut[phone], nil
 }
 
 func (f *fakeResults) Record(_ context.Context, r SendRecord) error {
@@ -199,5 +207,47 @@ func TestResultsListingNormalizesTheNumber(t *testing.T) {
 	}
 	if out, err := s.Results(context.Background(), "", 10); err != nil || len(out) != 1 {
 		t.Errorf("no number lists everything, got %v / %v", out, err)
+	}
+}
+
+func TestOptedOutNumberIsRefusedBeforeThePhone(t *testing.T) {
+	f := &fakeSender{enabled: true}
+	results := &fakeResults{optedOut: map[string]bool{"+15551234567": true}}
+	s := NewService(f, Config{Enabled: true}).SetResults(results)
+
+	_, err := s.Send(context.Background(), "+15551234567", "hi")
+	if code(t, err) != CodeRefused || !strings.Contains(err.Error(), ReasonOptedOut) {
+		t.Fatalf("want a refusal naming %q, got %v", ReasonOptedOut, err)
+	}
+	var p interface{ Permanent() bool }
+	if !errors.As(err, &p) || !p.Permanent() {
+		t.Error("opted_out must read as permanent so an auto-sender never retries it")
+	}
+	if f.sends != 0 {
+		t.Error("nothing may reach the phone for a number that opted out")
+	}
+}
+
+func TestOptOutReadFailureRefuses(t *testing.T) {
+	f := &fakeSender{enabled: true}
+	s := NewService(f, Config{Enabled: true}).SetResults(&fakeResults{err: errors.New("db down")})
+	if _, err := s.Send(context.Background(), "+15551234567", "hi"); code(t, err) != CodeResultsUnavailable {
+		t.Fatalf("an unreadable opt-out list must refuse, got %v", err)
+	}
+	if f.sends != 0 {
+		t.Error("nothing may be sent when opt-outs cannot be read")
+	}
+}
+
+// Encryption is not configurable: whatever the config, the sender is asked
+// for it, and the zero Config is the strictest one.
+func TestEncryptionIsAlwaysRequestedFromTheSender(t *testing.T) {
+	f := &fakeSender{enabled: true}
+	s := NewService(f, Config{Enabled: true})
+	if _, err := s.Send(context.Background(), "+15551234567", "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if f.lastOpt.RequireE2EE == nil || !*f.lastOpt.RequireE2EE {
+		t.Fatal("the sender must always be told to require E2EE")
 	}
 }

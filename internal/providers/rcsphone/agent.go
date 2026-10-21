@@ -345,7 +345,7 @@ func (a *Agent) Check(ctx context.Context, rawTo string) (*CheckResult, error) {
 		}
 	}
 
-	res.Eligible, res.Reason = eligibility(res, true)
+	res.Eligible, res.Reason = eligibility(res)
 	return res, nil
 }
 
@@ -368,28 +368,37 @@ func settles(reason string) bool {
 	return false
 }
 
-func (a *Agent) checkSettled(ctx context.Context, rawTo string, requireE2EE bool) (*CheckResult, string, error) {
+func (a *Agent) checkSettled(ctx context.Context, rawTo string) (*CheckResult, string, error) {
+	return settle(ctx, a.log, settleDelay, settleBudget, func(ctx context.Context) (*CheckResult, error) {
+		return a.Check(ctx, rawTo)
+	})
+}
+
+// settle re-checks a chat until it is eligible, until it fails for a reason
+// waiting cannot change, or until the budget runs out. Running out of budget
+// is a refusal, never a send: a send happens only when eligibility said yes.
+func settle(
+	ctx context.Context,
+	log zerolog.Logger,
+	delay, budget time.Duration,
+	check func(context.Context) (*CheckResult, error),
+) (*CheckResult, string, error) {
 	start := time.Now()
 	for attempt := 1; ; attempt++ {
-		chk, err := a.Check(ctx, rawTo)
+		chk, err := check(ctx)
 		if err != nil {
 			return nil, "", err
 		}
 
-		ok, reason := eligibility(chk, requireE2EE)
-		outOfTime := time.Since(start)+settleDelay > settleBudget
-		switch {
-		case ok && !lookupPending(chk):
+		ok, reason := eligibility(chk)
+		if ok {
 			return chk, "", nil
-		case ok && outOfTime:
-			// The lookup has not landed. Send anyway: the send finalizes the
-			// chat, and the outcome is recorded either way.
-			return chk, "", nil
-		case !ok && (!settles(reason) || outOfTime):
+		}
+		if !settles(reason) || time.Since(start)+delay > budget {
 			return chk, reason, nil
 		}
 
-		a.log.Debug().
+		log.Debug().
 			Str("to", chk.To).
 			Str("reason", reason).
 			Str("transport", chk.Transport).
@@ -400,16 +409,9 @@ func (a *Agent) checkSettled(ctx context.Context, rawTo string, requireE2EE bool
 		select {
 		case <-ctx.Done():
 			return chk, reason, nil
-		case <-time.After(settleDelay):
+		case <-time.After(delay):
 		}
 	}
-}
-
-// lookupPending: the chat is unfinalized and the phone has not recorded yet
-// what the contact can take. Each check starts that lookup, so a moment's
-// wait usually turns it into a yes, and a yes means the send goes encrypted.
-func lookupPending(c *CheckResult) bool {
-	return c.e2eePending && c.E2EECapability == CapabilityNotYet
 }
 
 // unresolved: the phone wrote the chat down as SMS when it was created and
@@ -423,13 +425,21 @@ func unresolved(c *CheckResult) bool {
 }
 
 // eligibility is the single place that decides whether a send may happen.
-// Every "no" is a refusal: nothing is sent. With requireE2EE only chats
-// already known to be encrypted are sent to. Without it a chat the phone has
-// not finalized yet is sent to as well, because the send is what finalizes
-// it and the outcome is recorded afterwards. A chat the phone records as RCS
-// without encryption is refused either way, and a chat it has not looked up
-// yet is refused as rcs_pending, which is retryable.
-func eligibility(c *CheckResult, requireE2EE bool) (bool, string) {
+// Every "no" is a refusal: nothing is sent, and there is no mode in which an
+// unconfirmed chat is sent to. A message goes out only when the phone's own
+// records say it will be end-to-end encrypted:
+//
+//   - the chat's newest protocol tombstone is an encrypted one, or
+//   - the chat is RCS but its tombstone is still the SMS-created first draft
+//     (see finalizing in e2ee.go) AND the phone's capability record for the
+//     contact reads yes, meaning the lookup found encrypted RCS.
+//
+// Everything else is a refusal. A capability that is not_yet, or missing
+// because the probe failed, is e2ee_pending (retryable). An iPhone on RCS
+// reads not_yet forever, so it times out as e2ee_pending and is never sent
+// to. A chat recorded as RCS without encryption, a capability of no, a
+// chat with no tombstone in reach, and an unknown state are all not_e2ee.
+func eligibility(c *CheckResult) (bool, string) {
 	switch {
 	case c.ReadOnly:
 		return false, ErrReadOnly.Error()
@@ -442,14 +452,23 @@ func eligibility(c *CheckResult, requireE2EE bool) (bool, string) {
 		return false, ErrNotRCS.Error()
 	case c.sim == nil || !c.sim.GetRCSChats().GetEnabled():
 		return false, ErrRCSOffOnSIM.Error()
+	}
+
+	switch {
+	case c.E2EE == e2eeOn:
+		return true, ""
 	case c.E2EE == e2eeOff:
 		return false, ErrNotE2EE.Error()
-	case requireE2EE && c.e2eePending:
+	case c.e2eePending:
+		switch c.E2EECapability {
+		case CapabilityYes:
+			return true, ""
+		case CapabilityNo:
+			return false, ErrNotE2EE.Error()
+		}
 		return false, ErrE2EEPending.Error()
-	case requireE2EE && c.E2EE != e2eeOn:
-		return false, ErrNotE2EE.Error()
 	}
-	return true, ""
+	return false, ErrNotE2EE.Error()
 }
 
 // --- send ------------------------------------------------------------------
@@ -474,14 +493,14 @@ type RefusedError struct {
 
 func (e *RefusedError) Error() string { return "refused: " + e.Reason }
 
-func (a *Agent) Send(ctx context.Context, rawTo, text string, requireE2EE bool, wait time.Duration) (*SendResult, error) {
+func (a *Agent) Send(ctx context.Context, rawTo, text string, wait time.Duration) (*SendResult, error) {
 	a.sendLock.Lock()
 	defer a.sendLock.Unlock()
 
 	if !a.phoneResponding.Load() {
 		return nil, &RefusedError{Reason: ErrPhoneOffline.Error()}
 	}
-	chk, reason, err := a.checkSettled(ctx, rawTo, requireE2EE)
+	chk, reason, err := a.checkSettled(ctx, rawTo)
 	if err != nil {
 		return nil, err
 	}

@@ -27,7 +27,6 @@ type config struct {
 	DatabaseURL    string
 	Debug          bool
 	Enabled        bool
-	RequireE2EE    bool
 	DryRun         bool
 	WaitSeconds    int
 	MonitorSeconds int
@@ -40,7 +39,6 @@ func loadConfig() config {
 		DatabaseURL:    env("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/rcs_messenger?sslmode=disable"),
 		Debug:          envBool("DEBUG", false),
 		Enabled:        envBool("RCS_ENABLED", true),
-		RequireE2EE:    envBool("RCS_REQUIRE_E2EE", false),
 		DryRun:         envBool("RCS_DRY_RUN", false),
 		WaitSeconds:    envInt("RCS_WAIT_SECONDS", 20),
 		MonitorSeconds: envInt("RCS_MONITOR_SECONDS", 60),
@@ -51,6 +49,13 @@ func loadConfig() config {
 func main() {
 	cfg := loadConfig()
 	logg.Setup(cfg.Debug)
+
+	// Encryption used to be optional here. It no longer is, and an old
+	// deployment that still sets this to false must not start silently
+	// believing it can send unconfirmed messages.
+	if v, err := strconv.ParseBool(env("RCS_REQUIRE_E2EE", "")); err == nil && !v {
+		logg.Fatal().Msg("RCS_REQUIRE_E2EE=false is no longer supported: messages are only ever sent to chats confirmed end-to-end encrypted. Remove the variable.")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -109,12 +114,15 @@ func setupRCS(cfg config, conn *sql.DB) *rcsStack {
 	}
 
 	svc := rcs.NewService(sender, rcs.Config{
-		Enabled:     cfg.Enabled,
-		RequireE2EE: cfg.RequireE2EE,
-		Wait:        wait,
-		DryRun:      cfg.DryRun,
-		Allowlist:   cfg.Allowlist,
-	}).SetResults(rcs.NewResultStore(conn))
+		Enabled:   cfg.Enabled,
+		Wait:      wait,
+		DryRun:    cfg.DryRun,
+		Allowlist: cfg.Allowlist,
+	})
+	// One store holds send outcomes and opt-outs: a STOP reply is recorded
+	// here and refuses every later send to that number.
+	results := rcs.NewResultStore(conn)
+	svc.SetResults(results).SetBlocker(results)
 
 	runner.OnInbound(func(from, text, messageID string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -131,7 +139,6 @@ func setupRCS(cfg config, conn *sql.DB) *rcsStack {
 		logg.Info().Msg("RCS enabled in dry-run, nothing reaches the phone")
 	default:
 		logg.Info().
-			Bool("require_e2ee", cfg.RequireE2EE).
 			Int("allowlisted", len(cfg.Allowlist)).
 			Msg("RCS sending enabled")
 	}

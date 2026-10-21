@@ -74,7 +74,7 @@ func post(t *testing.T, r *gin.Engine, path, body string) (int, envelope) {
 }
 
 func TestSendRoute(t *testing.T) {
-	r := router(t, rcs.Config{Enabled: true, RequireE2EE: true},
+	r := router(t, rcs.Config{Enabled: true},
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_ = json.NewEncoder(w).Encode(rcsdirect.SendResult{
 				Sent: true, MessageID: "m1", MessageType: 4, FinalStatus: "OUTGOING_DELIVERED",
@@ -96,7 +96,7 @@ func TestSendRoute(t *testing.T) {
 }
 
 func TestSendRouteRefusalIs409(t *testing.T) {
-	r := router(t, rcs.Config{Enabled: true, RequireE2EE: true},
+	r := router(t, rcs.Config{Enabled: true},
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(w).Encode(map[string]any{"refused": true, "reason": "not_rcs"})

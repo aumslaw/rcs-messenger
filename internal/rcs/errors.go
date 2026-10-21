@@ -27,6 +27,9 @@ const (
 // anything reaches the phone. See Outcome.
 const ReasonKnownUnencrypted = "known_unencrypted"
 
+// ReasonOptedOut is the refusal for a number that replied STOP (or similar).
+const ReasonOptedOut = "opted_out"
+
 func resultsErr(err error) *apperr.AppError {
 	return apperr.Wrap(err, CodeResultsUnavailable, http.StatusServiceUnavailable,
 		"rcs send results could not be read, refusing rather than risk a number on record")

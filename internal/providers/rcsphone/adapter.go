@@ -47,16 +47,14 @@ func (s *Sender) Send(ctx context.Context, to, message string, opts rcsdirect.Se
 		return nil, ErrNotPaired
 	}
 
-	requireE2EE := true
-	if opts.RequireE2EE != nil {
-		requireE2EE = *opts.RequireE2EE
-	}
+	// opts.RequireE2EE is deliberately not read: encryption is always
+	// required, and a caller cannot ask for less.
 	wait := opts.Wait
 	if wait <= 0 {
 		wait = 20 * time.Second
 	}
 
-	out, err := a.Send(ctx, to, message, requireE2EE, wait)
+	out, err := a.Send(ctx, to, message, wait)
 	if err != nil {
 		return nil, translateRefusal(err)
 	}

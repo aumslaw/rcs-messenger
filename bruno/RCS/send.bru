@@ -24,12 +24,14 @@ docs {
   refused with 409 and nothing goes out — no silent carrier charges, no green
   bubble.
 
-  Encryption is verified after the fact rather than demanded up front (with
-  `rcs.require_e2ee` false, the default). A chat the phone has not finalized
-  yet is sent to, because the send is what finalizes it; the chat is then
-  re-read and the result recorded per number (see `send results`). A number
-  whose message turned out to go as RCS without encryption is never auto-sent
-  to again, and a chat the phone already records as unencrypted is refused.
+  **It only sends when encryption is confirmed beforehand.** There is no
+  setting that relaxes this. The chat must either carry an encrypted protocol
+  tombstone, or still be the phone's unfinalized first draft with a capability
+  record of `yes`. Anything unclear (`not_yet`, an unreadable capability, no
+  tombstone, an iPhone on plain RCS) is refused, never sent. After the send the
+  chat is re-read as a check on that confirmation and the result is recorded
+  per number (see `send results`); if the check disagrees, the number is never
+  auto-sent to again.
 
   ```json
   {
@@ -82,8 +84,8 @@ docs {
     `session_not_active`, `rcs_pending`, `e2ee_pending` (transient, worth
     retrying a minute later — `rcs_pending` is a fresh chat the phone has not
     looked up yet, which reads as SMS until it has; see check eligibility for
-    what `e2ee_pending` means, and note that with `rcs.require_e2ee` false a
-    pending chat is sent to instead of refused). Callers should retry
+    what `e2ee_pending` means; a pending chat is always refused, never sent to.
+    An iPhone on plain RCS never leaves `e2ee_pending`). Callers should retry
     transient refusals themselves.
   - 503 — rcs disabled, no phone paired, or the send results could not be
     read (refused rather than risk a number on record)
