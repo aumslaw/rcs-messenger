@@ -81,6 +81,8 @@ type Sender struct {
 
 	hmu    sync.Mutex
 	health *rcsdirect.Health
+
+	in inboundState
 }
 
 func New(cfg Config) (*Sender, error) {

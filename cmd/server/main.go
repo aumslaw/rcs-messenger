@@ -49,6 +49,7 @@ type androidConfig struct {
 	MinGap       time.Duration
 	Jitter       time.Duration
 	SettleBudget time.Duration
+	Inbound      time.Duration // how often to read incoming replies (STOP); 0 turns it off
 }
 
 func loadConfig() config {
@@ -71,6 +72,7 @@ func loadConfig() config {
 			MinGap:       time.Duration(envInt("RCS_ANDROID_MIN_GAP_SECONDS", 45)) * time.Second,
 			Jitter:       time.Duration(envInt("RCS_ANDROID_JITTER_SECONDS", 15)) * time.Second,
 			SettleBudget: time.Duration(envInt("RCS_ANDROID_SETTLE_SECONDS", 60)) * time.Second,
+			Inbound:      time.Duration(envInt("RCS_ANDROID_INBOUND_SECONDS", 60)) * time.Second,
 		},
 	}
 }
@@ -99,6 +101,9 @@ func main() {
 	if cfg.Enabled {
 		if stack.runner != nil {
 			go stack.runner.Start(ctx, nil)
+		}
+		if stack.android != nil {
+			go stack.android.RunInbound(ctx, cfg.Android.Inbound)
 		}
 		go rcs.NewMonitor(stack.service, nil, time.Duration(cfg.MonitorSeconds)*time.Second).Start(ctx, nil)
 	}
@@ -133,6 +138,7 @@ type rcsStack struct {
 	service *rcs.Service
 	runner  *rcsphone.Runner
 	pairing *rcsphone.Pairing
+	android *rcsandroid.Sender
 }
 
 func setupRCS(cfg config, conn *sql.DB) *rcsStack {
@@ -140,6 +146,7 @@ func setupRCS(cfg config, conn *sql.DB) *rcsStack {
 		sender  rcsSender
 		runner  *rcsphone.Runner
 		pairing *rcsphone.Pairing
+		android *rcsandroid.Sender
 	)
 	switch cfg.Transport {
 	case "android":
@@ -159,7 +166,7 @@ func setupRCS(cfg config, conn *sql.DB) *rcsStack {
 		if err != nil {
 			logg.Fatal().Err(err).Msg("Could not set up the Android sender")
 		}
-		sender = a
+		sender, android = a, a
 		logg.Info().Msg("RCS transport: Android phone over adb (Google Messages app)")
 	case "web", "":
 		store := rcsphone.NewStore(conn)
@@ -194,6 +201,16 @@ func setupRCS(cfg config, conn *sql.DB) *rcsStack {
 	results := rcs.NewResultStore(conn)
 	svc.SetResults(results).SetBlocker(results)
 
+	if android != nil {
+		// Incoming replies are read off the phone's screen; a STOP blocks the number.
+		android.OnInbound(func(from, text, messageID string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if _, err := svc.HandleInbound(ctx, rcs.Inbound{From: from, Text: text, MessageID: messageID}); err != nil {
+				logg.Error().Err(err).Str("from", from).Msg("RCS inbound could not be handled")
+			}
+		})
+	}
 	if runner != nil {
 		runner.OnInbound(func(from, text, messageID string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -214,7 +231,7 @@ func setupRCS(cfg config, conn *sql.DB) *rcsStack {
 			Int("allowlisted", len(cfg.Allowlist)).
 			Msg("RCS sending enabled")
 	}
-	return &rcsStack{service: svc, runner: runner, pairing: pairing}
+	return &rcsStack{service: svc, runner: runner, pairing: pairing, android: android}
 }
 
 func setupRouter(cfg config, stack *rcsStack) *http.Server {

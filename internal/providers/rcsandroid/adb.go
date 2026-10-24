@@ -167,6 +167,18 @@ func (d *Device) OpenChat(ctx context.Context, number string) error {
 	return nil
 }
 
+// OpenHome opens the Messages conversation list, from a clean task.
+func (d *Device) OpenHome(ctx context.Context) error {
+	out, err := d.sh(ctx, "am start -W -f 0x10008000 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "+shQuote(d.m.Package))
+	if err != nil {
+		return err
+	}
+	if strings.Contains(out, "Error") {
+		return fmt.Errorf("could not open Google Messages: %s", out)
+	}
+	return nil
+}
+
 // Dump reads the screen.
 func (d *Device) Dump(ctx context.Context) (*Screen, error) {
 	out, err := d.r.Run(ctx, "exec-out", "uiautomator", "dump", "/dev/tty")

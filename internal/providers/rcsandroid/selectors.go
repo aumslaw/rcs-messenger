@@ -49,6 +49,11 @@ type Selectors struct {
 	// ("Send SMS"); the button keeps that label after text is typed, when the
 	// message box hint is hidden.
 	SendSMS string `json:"sendSms"`
+	// The conversation list: one row per chat, with its name, last message
+	// and time. Used to find chats that have something new.
+	ConvNameID    string `json:"convNameId"`
+	ConvSnippetID string `json:"convSnippetId"`
+	ConvTimeID    string `json:"convTimeId"`
 }
 
 func DefaultSelectors() Selectors {
@@ -71,6 +76,10 @@ func DefaultSelectors() Selectors {
 		MsgRCS:           `\brcs\b`,
 		MsgEncrypted:     `encrypt`,
 		SendSMS:          `\b(sms|mms)\b`,
+
+		ConvNameID:    "conversation_name",
+		ConvSnippetID: "conversation_snippet",
+		ConvTimeID:    "conversation_timestamp",
 	}
 }
 

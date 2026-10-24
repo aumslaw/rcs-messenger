@@ -5,6 +5,7 @@
 //	androidprobe dump  [+15551234567]     # what the screen says, node by node
 //	androidprobe check +15551234567       # opens the chat, reports encrypted / plain RCS / SMS
 //	androidprobe send  +15551234567 "text"
+//	androidprobe inbound                  # one pass over the chat list: prints new incoming messages
 //
 // Settings come from the same RCS_ANDROID_* variables as the server.
 package main
@@ -20,6 +21,7 @@ import (
 
 	"github.com/zagnu-labs/rcs-messenger/internal/providers/rcsandroid"
 	"github.com/zagnu-labs/rcs-messenger/internal/providers/rcsdirect"
+	"github.com/zagnu-labs/rcs-messenger/internal/rcs"
 )
 
 func env(k, d string) string {
@@ -39,7 +41,7 @@ func secs(k string, d int) time.Duration {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: androidprobe health | dump [number] | check <number> | send <number> <text>")
+		fmt.Fprintln(os.Stderr, "usage: androidprobe health | dump [number] | check <number> | send <number> <text> | inbound")
 		os.Exit(2)
 	}
 	sel, err := rcsandroid.LoadSelectors(env("RCS_ANDROID_SELECTORS", ""))
@@ -75,6 +77,13 @@ func main() {
 			}
 			fmt.Printf("%-34s id=%-30q text=%-30q desc=%q\n", short(n.Class), n.ID(), n.Text, n.Desc)
 		}
+	case "inbound":
+		s.OnInbound(func(from, text, id string) {
+			fmt.Printf("incoming from %s: %q (%s) optOut=%v\n", from, text, id, rcs.IsOptOut(text))
+		})
+		n, err := s.PollInbound(ctx)
+		fatal(err)
+		fmt.Printf("=> %d new incoming message(s)\n", n)
 	case "check":
 		need(3)
 		c, err := s.Check(ctx, os.Args[2])

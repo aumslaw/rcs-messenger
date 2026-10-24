@@ -1,7 +1,6 @@
 package rcsandroid
 
 import (
-	"regexp"
 	"sort"
 	"strings"
 )
@@ -25,9 +24,9 @@ type ChatView struct {
 	ComposeText  string // what is typed in the box ("" when the box shows its hint)
 }
 
-var spaceRe = regexp.MustCompile(`\s+`)
-
-func norm(s string) string { return strings.TrimSpace(spaceRe.ReplaceAllString(s, " ")) }
+// norm collapses every kind of white space, including the narrow no-break
+// space the app puts in times ("10:26 AM").
+func norm(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 func (m *matcher) inPackage(n Node) bool { return n.Package == "" || n.Package == m.Package }
 

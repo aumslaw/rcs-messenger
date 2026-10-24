@@ -42,6 +42,7 @@ One phone does one thing at a time, and sends are spaced like a person: at least
 | `RCS_ANDROID_MIN_GAP_SECONDS` | 45 | minimum gap between sends |
 | `RCS_ANDROID_JITTER_SECONDS` | 15 | extra random gap |
 | `RCS_ANDROID_SETTLE_SECONDS` | 60 | how long a send waits for the chat to show encrypted |
+| `RCS_ANDROID_INBOUND_SECONDS` | 60 | how often incoming replies are read (STOP opt-outs); 0 turns it off |
 
 Sends can take minutes (settle, spacing, status), so the server's write timeout is raised for this transport and callers should allow about five minutes. The existing `rcsdirect` client already waits three.
 
@@ -54,6 +55,7 @@ go run ./cmd/androidprobe health
 go run ./cmd/androidprobe dump +15551234567     # the open chat's screen, node by node
 go run ./cmd/androidprobe check +15551234567    # ENCRYPTED RCS / PLAIN RCS / SMS / UNREADABLE
 go run ./cmd/androidprobe send +15551234567 "test message"
+go run ./cmd/androidprobe inbound                # one pass: new incoming messages, and whether each is a STOP
 ```
 
 `send` refuses everything the server would refuse.
@@ -67,6 +69,7 @@ Verified on a real Google Messages (Android 14 emulator, SMS only):
 - a non-encrypted chat is refused and nothing is typed or sent
 - recovery: adb server killed (3 of 3), screen off (3 of 3), numeric PIN lock (3 of 3), PIN not configured (refused `phone_locked`)
 - the whole path through the service layer (results recorded, SMS number blocked), with a simulated phone for the RCS and encrypted cases
+- incoming replies: a STOP sent from the emulator echoed back, was read off the list and thread, recorded as an opt-out in Postgres by the real server, and a later send to that number was refused `opted_out`
 
 **Not verified, needs one run on a real RCS phone** (an emulator has no carrier RCS, so these strings were never seen):
 
@@ -90,7 +93,7 @@ Do this once with a phone in hand:
 ## Known limits
 
 - **Text:** printable ASCII and line breaks only (Android's `input text` cannot type emoji or accents). Anything else is refused `unsupported_text` before the phone is touched. Emoji needs an input method such as ADBKeyBoard; not built.
-- **Inbound / STOP replies:** the web transport receives them; this one does not read incoming messages yet. Feed STOP replies to `POST /internal/rcs/inbound` from wherever replies are seen, or add a thread poll (`Thread()` already reads the open chat).
+- **Inbound / STOP replies:** read off the screen. Every `RCS_ANDROID_INBOUND_SECONDS` the sender opens the Messages list, opens each chat whose last message or time changed, and passes the other side's messages to the same opt-out handler the web transport uses; a STOP blocks the number (`opted_out`). Limits: it can only see the chats and bubbles on screen (the newest ones), so it has to run often enough that fewer than a screenful of replies arrive between passes; a chat saved under a contact name (not a phone number) is skipped, because the number is not on the list, so keep outreach numbers unsaved; it shares the phone with sends, one thing at a time. Message ids are stable across restarts, so a repeat is harmless.
 - **A send that cannot be confirmed:** if the message is in the thread but no final status shows, it is reported sent (`sent_unconfirmed`), not failed, so it is never retried into a duplicate.
 - **Chat flips to SMS between the check and the tap:** caught by the send-button label check; if it still goes out as SMS the message label exposes it and the number is blocked.
 - **Phone model differences:** the swipe that lifts the lock screen assumes a normal portrait phone. A phone with a different layout may need a different swipe.
