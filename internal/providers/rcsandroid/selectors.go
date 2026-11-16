@@ -62,6 +62,9 @@ type Selectors struct {
 	// ("Send SMS"); the button keeps that label after text is typed, when the
 	// message box hint is hidden.
 	SendSMS string `json:"sendSms"`
+	// TitleID is the resource id of the chat's title in an open thread (the
+	// contact name or the number).
+	TitleID string `json:"titleId"`
 	// The conversation list: one row per chat, with its name, last message
 	// and time. Used to find chats that have something new.
 	ConvNameID    string `json:"convNameId"`
@@ -97,6 +100,7 @@ func DefaultSelectors() Selectors {
 		MsgEncrypted:     `encrypt`,
 		SendSMS:          `\b(sms|mms)\b`,
 
+		TitleID:       "conversation_title",
 		ConvNameID:    "conversation_name",
 		ConvSnippetID: "conversation_snippet",
 		ConvTimeID:    "conversation_timestamp",

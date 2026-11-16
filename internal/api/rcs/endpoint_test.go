@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -211,5 +212,38 @@ func TestInboundRouteAcceptsAnOrdinaryReply(t *testing.T) {
 	}
 	if res.OptOut || res.Blocked {
 		t.Errorf("an ordinary reply must not opt anyone out, got %+v", res)
+	}
+}
+
+func TestSendRouteIdempotencyKeyReplaysAndBindsNumber(t *testing.T) {
+	var hits int32
+	r := router(t, rcs.Config{Enabled: true},
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			atomic.AddInt32(&hits, 1)
+			_ = json.NewEncoder(w).Encode(rcsdirect.SendResult{Sent: true, MessageID: "m1", MessageType: 4, FinalStatus: "OUTGOING_DELIVERED"})
+		}))
+	do := func(hdr, body string) (int, envelope) {
+		req := httptest.NewRequest(http.MethodPost, "/internal/rcs/send", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if hdr != "" {
+			req.Header.Set("Idempotency-Key", hdr)
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		var env envelope
+		_ = json.Unmarshal(w.Body.Bytes(), &env)
+		return w.Code, env
+	}
+	s1, e1 := do("abc", `{"to":"+15551234567","message":"hi"}`)
+	s2, e2 := do("", `{"to":"+15551234567","message":"hi","idempotencyKey":"abc"}`)
+	if s1 != 200 || s2 != 200 || string(e1.Data) != string(e2.Data) {
+		t.Fatalf("replay differs: %d %s / %d %s", s1, e1.Data, s2, e2.Data)
+	}
+	if n := atomic.LoadInt32(&hits); n != 1 {
+		t.Fatalf("%d upstream sends, want 1", n)
+	}
+	s3, _ := do("abc", `{"to":"+15559876543","message":"hi"}`)
+	if s3 != http.StatusUnprocessableEntity {
+		t.Fatalf("different number with same key: status %d, want 422", s3)
 	}
 }

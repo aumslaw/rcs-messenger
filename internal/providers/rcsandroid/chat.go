@@ -125,6 +125,12 @@ const (
 	ReasonWrongChat      = "wrong_chat"    // the open chat is for a different number
 	ReasonUnsupported    = "unsupported_text"
 	ReasonTypingMismatch = "typing_mismatch"
+	// ReasonNotFullscreen: Messages is in split-screen or a floating window, so
+	// taps and the left/right test for who wrote a bubble cannot be trusted.
+	ReasonNotFullscreen = "window_not_fullscreen"
+	// ReasonUnresolvedChat: the chat is saved under a contact name and its number
+	// could not be read, so an inbound STOP from it could not be honoured.
+	ReasonUnresolvedChat = "unresolved_chat"
 )
 
 // eligibility is the one send rule: send only when the app shows this chat
@@ -286,4 +292,19 @@ func sameNumber(a, b string) bool {
 		b = b[len(b)-10:]
 	}
 	return a != "" && a == b
+}
+
+// headerTitle is the open chat's title (a number or a contact name).
+func (m *matcher) headerTitle(s *Screen) string {
+	if n, ok := s.Find(func(n Node) bool {
+		return m.inPackage(n) && m.TitleID != "" && n.ID() == m.TitleID && norm(n.Text) != ""
+	}); ok {
+		return norm(n.Text)
+	}
+	for _, n := range s.Nodes {
+		if m.inPackage(n) && n.Class == "android.widget.TextView" && n.Bounds.T >= 0 && n.Bounds.T < 260 && norm(n.Text) != "" {
+			return norm(n.Text)
+		}
+	}
+	return ""
 }

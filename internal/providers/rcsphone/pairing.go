@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/zagnu-labs/rcs-messenger/internal/logg"
 	"strings"
 	"sync"
 	"time"
@@ -105,7 +106,7 @@ func (p *Pairing) watchQR(cli *libgm.Client, att *attempt, paired <-chan *gmprot
 				return
 			}
 			att.finish(data.GetMobile().GetSourceID(), "")
-			p.log.Info().Str("phone", data.GetMobile().GetSourceID()).Msg("rcs: phone paired")
+			p.log.Info().Str("phone", logg.Mask(data.GetMobile().GetSourceID())).Msg("rcs: phone paired")
 			return
 
 		case <-time.After(qrExpiry):
@@ -217,7 +218,7 @@ func (p *Pairing) PairWithCookies(ctx context.Context, har []byte) (string, erro
 			p.log.Error().Err(err).Msg("rcs: paired, but storing the session failed")
 			return
 		}
-		p.log.Info().Str("phone", phoneID).Msg("rcs: phone paired by emoji")
+		p.log.Info().Str("phone", logg.Mask(phoneID)).Msg("rcs: phone paired by emoji")
 	}()
 
 	return emoji, nil
@@ -257,7 +258,7 @@ func (p *Pairing) RefreshWithCookies(ctx context.Context, har []byte) error {
 	if err := p.save(ad); err != nil {
 		return err
 	}
-	p.log.Info().Str("phone", ad.Mobile.GetSourceID()).Msg("rcs: session refreshed")
+	p.log.Info().Str("phone", logg.Mask(ad.Mobile.GetSourceID())).Msg("rcs: session refreshed")
 	return nil
 }
 

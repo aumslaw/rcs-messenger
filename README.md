@@ -13,7 +13,8 @@ The server listens on `127.0.0.1:8080` and creates its two tables on startup.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ADDR` | `127.0.0.1:8080` | Listen address. The API has no auth, so keep it on localhost. |
+| `ADDR` | `127.0.0.1:8080` | Listen address. A non-loopback address refuses to start unless `RCS_API_TOKEN` is set. |
+| `RCS_API_TOKEN` | empty | When set, every route except `/health` needs `Authorization: Bearer <token>`. Send retries safely with an `Idempotency-Key` header: the same key never sends twice. |
 | `DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/rcs_messenger?sslmode=disable` | Postgres holding the paired session and the send results |
 | `RCS_ENABLED` | `true` | Run the phone connection and allow sends |
 | `RCS_DRY_RUN` | `false` | Accept sends without reaching the phone |

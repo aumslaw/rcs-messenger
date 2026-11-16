@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -34,6 +36,7 @@ type config struct {
 	WaitSeconds    int
 	MonitorSeconds int
 	Allowlist      []string
+	APIToken       string // RCS_API_TOKEN: when set, every route but /health needs "Authorization: Bearer <token>"
 
 	// Transport picks how messages reach the phone: "web" (Messages for web,
 	// paired once) or "android" (drive the Google Messages app over adb).
@@ -63,6 +66,7 @@ func loadConfig() config {
 		WaitSeconds:    envInt("RCS_WAIT_SECONDS", 20),
 		MonitorSeconds: envInt("RCS_MONITOR_SECONDS", 60),
 		Allowlist:      envList("RCS_ALLOWLIST_PHONES"),
+		APIToken:       env("RCS_API_TOKEN", ""),
 		Transport:      strings.ToLower(env("RCS_TRANSPORT", "web")),
 		Android: androidConfig{
 			ADB:          env("RCS_ANDROID_ADB", "adb"),
@@ -87,6 +91,10 @@ func main() {
 	// believing it can send unconfirmed messages.
 	if v, err := strconv.ParseBool(env("RCS_REQUIRE_E2EE", "")); err == nil && !v {
 		logg.Fatal().Msg("RCS_REQUIRE_E2EE=false is no longer supported: messages are only ever sent to chats confirmed end-to-end encrypted. Remove the variable.")
+	}
+
+	if err := checkBind(cfg.Addr, cfg.APIToken); err != nil {
+		logg.Fatal().Err(err).Msg("refusing to start")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -216,7 +224,7 @@ func setupRCS(cfg config, conn *sql.DB) *rcsStack {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if _, err := svc.HandleInbound(ctx, rcs.Inbound{From: from, Text: text, MessageID: messageID}); err != nil {
-				logg.Error().Err(err).Str("from", from).Msg("RCS inbound could not be handled")
+				logg.Error().Err(err).Str("from", logg.Mask(from)).Msg("RCS inbound could not be handled")
 			}
 		})
 	}
@@ -246,6 +254,7 @@ func setupRouter(cfg config, stack *rcsStack) *http.Server {
 		e.SetPairing(stack.pairing)
 	}
 	r := engine.Group("/internal/rcs")
+	r.Use(requireToken(cfg.APIToken))
 
 	r.GET("/health", e.Health)
 	r.POST("/check", e.Check)
@@ -337,5 +346,45 @@ func writeTimeout(cfg config) time.Duration {
 	if cfg.Transport == "android" {
 		return cfg.Android.SettleBudget + cfg.Android.MinGap + cfg.Android.Jitter + 3*time.Minute
 	}
-	return 30 * time.Second
+	// rcsdirect's own client waits up to 3 minutes for a send. Sends also run
+	// detached from the request, so a timeout here never aborts or loses one.
+	return 4 * time.Minute
+}
+
+// checkBind refuses a listen address reachable from other machines unless an
+// API token is set: every endpoint can send a message or read a thread.
+func checkBind(addr, token string) error {
+	if token != "" {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("ADDR %q is not host:port: %w", addr, err)
+	}
+	if host == "localhost" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("ADDR %q is not loopback and RCS_API_TOKEN is not set: the API has no other protection", addr)
+}
+
+// requireToken demands "Authorization: Bearer <token>" on every route except
+// /health. With no token configured it lets everything through (the server
+// only gets here on a loopback address, see checkBind).
+func requireToken(token string) gin.HandlerFunc {
+	want := []byte(token)
+	return func(c *gin.Context) {
+		if token == "" || strings.HasSuffix(c.FullPath(), "/health") {
+			c.Next()
+			return
+		}
+		got := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(got), want) != 1 {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			return
+		}
+		c.Next()
+	}
 }

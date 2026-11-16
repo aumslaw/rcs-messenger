@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/zagnu-labs/rcs-messenger/internal/logg"
 	"regexp"
 	"sort"
 	"strings"
@@ -422,7 +423,7 @@ func settle(
 		}
 
 		log.Debug().
-			Str("to", chk.To).
+			Str("to", logg.Mask(chk.To)).
 			Str("reason", reason).
 			Str("transport", chk.Transport).
 			Str("capability", string(chk.E2EECapability)).
@@ -700,7 +701,7 @@ func (a *Agent) verifyAfterSend(ctx context.Context, rawTo string) *CheckResult 
 	for attempt := 1; attempt <= verifyAttempts; attempt++ {
 		chk, err := a.Check(ctx, rawTo)
 		if err != nil {
-			a.log.Warn().Err(err).Str("to", rawTo).Int("attempt", attempt).
+			a.log.Warn().Err(err).Str("to", logg.Mask(rawTo)).Int("attempt", attempt).
 				Msg("could not re-read the chat after sending")
 			return last
 		}

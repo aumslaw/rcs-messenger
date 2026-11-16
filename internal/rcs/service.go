@@ -39,6 +39,7 @@ type Service struct {
 	results   Results
 	cfg       Config
 	allowlist map[string]bool
+	idem      idemStore
 }
 
 func (s *Service) SetBlocker(b Blocker) *Service {
@@ -62,7 +63,7 @@ func NewService(client sender, cfg Config) *Service {
 	for _, raw := range cfg.Allowlist {
 		n, err := NormalizeNumber(raw)
 		if err != nil {
-			logg.Warn().Str("number", raw).Msg("RCS allowlist entry is not E.164, ignoring")
+			logg.Warn().Str("number", logg.Mask(raw)).Msg("RCS allowlist entry is not E.164, ignoring")
 			continue
 		}
 		allow[n] = true
@@ -113,7 +114,7 @@ func (s *Service) Send(ctx context.Context, rawTo, message string) (*Result, err
 	if out, err := s.optedOut(ctx, to); err != nil {
 		return nil, err
 	} else if out {
-		logg.Info().Str("to", to).Msg("RCS send refused, this number opted out")
+		logg.Info().Str("to", logg.Mask(to)).Msg("RCS send refused, this number opted out")
 		s.record(ctx, SendRecord{
 			Phone: to, Outcome: OutcomeFailed, Status: ReasonOptedOut,
 			Detail: "refused, nothing sent: the number replied STOP or similar",
@@ -125,7 +126,7 @@ func (s *Service) Send(ctx context.Context, rawTo, message string) (*Result, err
 	if blocked, err := s.knownUnencrypted(ctx, to); err != nil {
 		return nil, err
 	} else if blocked {
-		logg.Info().Str("to", to).Msg("RCS send refused, a past send to this number went out unencrypted")
+		logg.Info().Str("to", logg.Mask(to)).Msg("RCS send refused, a past send to this number went out unencrypted")
 		s.record(ctx, SendRecord{
 			Phone: to, Outcome: OutcomeFailed, Status: ReasonKnownUnencrypted,
 			Detail: "refused, nothing sent: a past send to this number went out without encryption",
@@ -137,7 +138,7 @@ func (s *Service) Send(ctx context.Context, rawTo, message string) (*Result, err
 	}
 
 	if s.cfg.DryRun {
-		logg.Info().Str("to", to).Int("chars", len(message)).Msg("RCS dry run, nothing sent")
+		logg.Info().Str("to", logg.Mask(to)).Int("chars", len(message)).Msg("RCS dry run, nothing sent")
 		return &Result{To: to, DryRun: true, Transport: "none"}, nil
 	}
 
@@ -152,14 +153,14 @@ func (s *Service) Send(ctx context.Context, rawTo, message string) (*Result, err
 		var refused *rcsdirect.RefusedError
 		if errors.As(err, &refused) {
 			logg.Info().
-				Str("to", to).
+				Str("to", logg.Mask(to)).
 				Str("reason", refused.Reason).
 				Bool("retryable", !refused.Permanent()).
 				Msg("RCS send refused, nothing sent")
 			s.record(ctx, refusalRecord(to, refused))
 			return nil, refusedErr(err, refused.Reason, !refused.Permanent())
 		}
-		logg.Error().Err(err).Str("to", to).Msg("RCS send failed")
+		logg.Error().Err(err).Str("to", logg.Mask(to)).Msg("RCS send failed")
 		s.record(ctx, SendRecord{Phone: to, Outcome: OutcomeFailed, Status: "sender_error", Detail: err.Error()})
 		return nil, senderErr(err)
 	}
@@ -174,7 +175,7 @@ func (s *Service) Send(ctx context.Context, rawTo, message string) (*Result, err
 		evt = logg.Error()
 	}
 	evt.
-		Str("to", to).
+		Str("to", logg.Mask(to)).
 		Bool("sent", out.Sent).
 		Str("outcome", string(outcome)).
 		Str("transport", out.Transport()).
@@ -209,7 +210,7 @@ func (s *Service) optedOut(ctx context.Context, to string) (bool, error) {
 	}
 	out, err := c.OptedOut(ctx, to)
 	if err != nil {
-		logg.Error().Err(err).Str("to", to).Msg("RCS opt-outs could not be read, refusing")
+		logg.Error().Err(err).Str("to", logg.Mask(to)).Msg("RCS opt-outs could not be read, refusing")
 		return false, resultsErr(err)
 	}
 	return out, nil
@@ -223,7 +224,7 @@ func (s *Service) knownUnencrypted(ctx context.Context, to string) (bool, error)
 	}
 	blocked, err := s.results.Blocked(ctx, to)
 	if err != nil {
-		logg.Error().Err(err).Str("to", to).Msg("RCS send results could not be read, refusing")
+		logg.Error().Err(err).Str("to", logg.Mask(to)).Msg("RCS send results could not be read, refusing")
 		return false, resultsErr(err)
 	}
 	return blocked, nil
@@ -240,7 +241,7 @@ func (s *Service) record(ctx context.Context, r SendRecord) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if err := s.results.Record(ctx, r); err != nil {
-		logg.Error().Err(err).Str("to", r.Phone).Str("outcome", string(r.Outcome)).
+		logg.Error().Err(err).Str("to", logg.Mask(r.Phone)).Str("outcome", string(r.Outcome)).
 			Msg("RCS send outcome could not be recorded")
 	}
 }

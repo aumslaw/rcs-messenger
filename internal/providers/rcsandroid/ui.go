@@ -117,3 +117,12 @@ func (s *Screen) FindAll(match func(Node) bool) []Node {
 	}
 	return out
 }
+
+// RootBounds is the area of the app's top-level window in a dump. In
+// split-screen or a floating window it is smaller than the display.
+func (s *Screen) RootBounds() Rect {
+	if len(s.Nodes) == 0 {
+		return Rect{}
+	}
+	return s.Nodes[0].Bounds
+}

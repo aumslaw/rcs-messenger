@@ -61,21 +61,21 @@ func (s *Service) HandleInbound(ctx context.Context, in Inbound) (*InboundResult
 		return &InboundResult{From: from}, nil
 	}
 
-	logg.Info().Str("from", from).Msg("RCS inbound opt-out")
+	logg.Info().Str("from", logg.Mask(from)).Msg("RCS inbound opt-out")
 
 	if s == nil || s.blocker == nil {
-		logg.Warn().Str("from", from).
+		logg.Warn().Str("from", logg.Mask(from)).
 			Msg("RCS opt-out received but no blocker configured, number NOT suppressed")
 		return &InboundResult{From: from, OptOut: true}, nil
 	}
 
 	recorded, err := s.blocker.BlockNumber(ctx, from, "replied "+strings.TrimSpace(in.Text)+" over RCS")
 	if err != nil {
-		logg.Error().Err(err).Str("from", from).Msg("RCS opt-out could not be recorded")
+		logg.Error().Err(err).Str("from", logg.Mask(from)).Msg("RCS opt-out could not be recorded")
 		return nil, blockFailedErr(err)
 	}
 	if !recorded {
-		logg.Warn().Str("from", from).
+		logg.Warn().Str("from", logg.Mask(from)).
 			Msg("RCS opt-out was NOT recorded with the opt-out store, this number will still be texted")
 	}
 

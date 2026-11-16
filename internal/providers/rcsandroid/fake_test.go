@@ -40,6 +40,7 @@ type fakePhone struct {
 	dropSend         bool   // the send tap does not register: the text stays in the box
 	header           string // the number in the title bar ("" = a contact name, nothing to read)
 	offline          bool   // no validated internet connection
+	rootBounds       string // the app window's bounds in the dump ("" = whole 1080x2400 screen)
 }
 
 func newPhone(kinds ...Kind) *fakePhone {
@@ -85,6 +86,8 @@ func (p *fakePhone) Run(_ context.Context, args ...string) ([]byte, error) {
 				return []byte("NetworkAgentInfo{ni{WIFI CONNECTED extra: } Score(Policies : EVER_EVALUATED&IS_UNMETERED)}\nNetworkAgentInfo{ni{MOBILE[NR] CONNECTED extra: ims} Score(IS_VALIDATED)}\n"), nil
 			}
 			return []byte("NetworkAgentInfo{ni{WIFI CONNECTED extra: } Score(EVER_VALIDATED&IS_VALIDATED)}\n"), nil
+		case cmd == "wm size":
+			return []byte("Physical size: 1080x2400\n"), nil
 		case strings.HasPrefix(cmd, "dumpsys window"):
 			if p.locked {
 				return []byte("isKeyguardShowing=true\nmWakefulness=Awake"), nil
@@ -210,7 +213,11 @@ func (p *fakePhone) dumpLocked() []byte {
 	if p.sentMsg == "" {
 		p.dumps++
 	}
-	return []byte(`<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0"><node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.google.android.apps.messaging" content-desc="" bounds="[0,0][1080,2400]">` +
+	root := p.rootBounds
+	if root == "" {
+		root = "[0,0][1080,2400]"
+	}
+	return []byte(`<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0"><node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.google.android.apps.messaging" content-desc="" bounds="` + root + `">` +
 		strings.Join(nodes, "") + `</node></hierarchy>UI hierchary dumped to: /dev/tty`)
 }
 

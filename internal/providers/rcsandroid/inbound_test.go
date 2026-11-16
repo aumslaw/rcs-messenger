@@ -162,17 +162,6 @@ func TestStopReplyBlocksTheNumberThroughTheService(t *testing.T) {
 	}
 }
 
-func TestAContactNameChatIsSkippedNotMisattributed(t *testing.T) {
-	list := strings.Replace(readFile(t, "real_conversation_list.xml"), `text="(555) 123-4567"`, `text="Ann Lee"`, 1)
-	r := &pagesRunner{list: list, thread: readFile(t, "real_sms_thread.xml")}
-	s := newSender(newPhone(KindSMS), newClock(), func(c *Config) { c.Runner = r })
-	var n int
-	s.OnInbound(func(string, string, string) error { n++; return nil })
-	if _, err := s.PollInbound(context.Background()); err != nil || n != 0 || r.taps != 0 {
-		t.Fatalf("a saved contact's chat has no readable number and must be skipped: n=%d taps=%d err=%v", n, r.taps, err)
-	}
-}
-
 // A STOP whose opt-out failed to save must be read again on the next pass, not
 // marked delivered: before the fix the message key was set before the handler ran.
 func TestFailedInboundHandlerIsRetriedNextPass(t *testing.T) {

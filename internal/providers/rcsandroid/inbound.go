@@ -5,6 +5,8 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -104,8 +106,49 @@ func (m *matcher) IncomingMessages(s *Screen) []string {
 	return out
 }
 
-func messageKey(number, text string, occurrence int) string {
-	sum := sha1.Sum([]byte(fmt.Sprintf("%s|%s|%d", number, norm(text), occurrence)))
+// Bubble is one incoming message with the context that tells it apart from an
+// identical one: the text of the bubble just above it (either side) and how
+// many bubbles with that same context and text came before it on screen.
+type Bubble struct {
+	Text       string
+	Prev       string
+	Occurrence int
+	Top        bool // the first bubble on screen: its Prev is unknown (scrolled off)
+}
+
+// IncomingBubbles reads the other side's messages in an open thread, top to
+// bottom, with what they need for an id that is distinct per bubble and the
+// same every time the same screen is read.
+func (m *matcher) IncomingBubbles(s *Screen) []Bubble {
+	width := 0
+	for _, n := range s.Nodes {
+		width = max(width, n.Bounds.R)
+	}
+	all := s.FindAll(func(n Node) bool {
+		return m.inPackage(n) && n.ID() == m.BubbleID && strings.TrimSpace(n.Text) != ""
+	})
+	sort.SliceStable(all, func(i, j int) bool { return all[i].Bounds.T < all[j].Bounds.T })
+	var out []Bubble
+	seen := map[string]int{}
+	for i, n := range all {
+		cx, _ := n.Bounds.Center()
+		if width <= 0 || cx >= width/2 {
+			continue
+		}
+		b := Bubble{Text: n.Text, Top: i == 0}
+		if i > 0 {
+			b.Prev = norm(all[i-1].Text)
+		}
+		k := b.Prev + "\x00" + norm(n.Text)
+		seen[k]++
+		b.Occurrence = seen[k]
+		out = append(out, b)
+	}
+	return out
+}
+
+func messageKey(number string, b Bubble) string {
+	sum := sha1.Sum([]byte(fmt.Sprintf("%s|%s|%s|%d", number, norm(b.Text), b.Prev, b.Occurrence)))
 	return "android:" + hex.EncodeToString(sum[:8])
 }
 
@@ -114,6 +157,18 @@ type inboundState struct {
 	fn       InboundFunc
 	rows     map[string]string // chat name -> last row key seen
 	messages map[string]bool   // message keys already delivered
+	texts    map[string]bool   // number|text already delivered under any id
+	names    map[string]string // contact-name chat -> number read from its details
+	unres    map[string]bool   // contact-name chats whose number could not be read
+}
+
+func (s *Sender) isUnresolved(title string) bool {
+	if title == "" {
+		return false
+	}
+	s.in.mu.Lock()
+	defer s.in.mu.Unlock()
+	return s.in.unres[title]
 }
 
 // OnInbound sets where incoming messages go (the opt-out handler).
@@ -133,6 +188,9 @@ func (s *Sender) PollInbound(ctx context.Context) (int, error) {
 	fn := s.in.fn
 	if s.in.rows == nil {
 		s.in.rows, s.in.messages = map[string]string{}, map[string]bool{}
+	}
+	if s.in.texts == nil {
+		s.in.texts, s.in.names, s.in.unres = map[string]bool{}, map[string]string{}, map[string]bool{}
 	}
 	s.in.mu.Unlock()
 	if fn == nil {
@@ -164,9 +222,9 @@ func (s *Sender) PollInbound(ctx context.Context) (int, error) {
 		}
 		number, ok := NumberFromName(row.Name)
 		if !ok {
-			logg.Warn().Str("chat", row.Name).Msg("Android inbound: chat is not a phone number (a saved contact?), cannot tell who it is; skipping")
-			s.remember(row)
-			continue
+			s.in.mu.Lock()
+			number, ok = s.in.names[row.Name], s.in.names[row.Name] != ""
+			s.in.mu.Unlock()
 		}
 		x, y := row.Bounds.Center()
 		if err := s.dev.Tap(ctx, x, y); err != nil {
@@ -179,14 +237,38 @@ func (s *Sender) PollInbound(ctx context.Context) (int, error) {
 		if err != nil {
 			return delivered, err
 		}
-		seen := map[string]int{}
+		if !ok {
+			// A saved contact: the list shows a name, so read the number off the
+			// thread or its details. Unreadable means a STOP from this chat could
+			// not opt anyone out: flag it so the sender refuses to text it.
+			number, thread = s.resolveNumber(ctx, thread)
+			s.in.mu.Lock()
+			if number == "" {
+				s.in.unres[row.Name] = true
+			} else {
+				s.in.names[row.Name] = number
+				delete(s.in.unres, row.Name)
+			}
+			s.in.mu.Unlock()
+			if number == "" {
+				logg.Warn().Str("chat", row.Name).Msg("Android inbound: chat is saved under a name and its number could not be read; marked unresolved, sends to it are refused")
+				s.remember(row)
+				_ = s.dev.Key(ctx, "KEYCODE_BACK")
+				continue
+			}
+		}
 		failed := false
-		for _, text := range s.dev.m.IncomingMessages(thread) {
-			k := norm(text)
-			seen[k]++
-			id := messageKey(number, text, seen[k])
+		for _, b := range s.dev.m.IncomingBubbles(thread) {
+			text := b.Text
+			id := messageKey(number, b)
+			tk := number + "|" + norm(text)
 			s.in.mu.Lock()
 			done := s.in.messages[id]
+			// The first bubble on screen has lost its context to scrolling: if
+			// the same text was already delivered, it is that message.
+			if b.Top && s.in.texts[tk] {
+				done = true
+			}
 			s.in.mu.Unlock()
 			if done {
 				continue
@@ -200,6 +282,7 @@ func (s *Sender) PollInbound(ctx context.Context) (int, error) {
 			}
 			s.in.mu.Lock()
 			s.in.messages[id] = true
+			s.in.texts[tk] = true
 			s.in.mu.Unlock()
 			delivered++
 		}
@@ -269,4 +352,61 @@ func (s *Sender) RunInbound(ctx context.Context, every time.Duration) {
 		case <-t.C:
 		}
 	}
+}
+
+var phoneInTextRe = regexp.MustCompile(`\+?\d[\d\s().\-]{7,}\d`)
+
+// resolveNumber reads the number of a chat saved under a contact name: from the
+// title bar if it shows one, else from the contact details the title opens. It
+// returns "" if no number could be read, and the thread screen to read bubbles
+// from (the details screen is backed out of).
+func (s *Sender) resolveNumber(ctx context.Context, thread *Screen) (string, *Screen) {
+	if n, ok := NumberFromName(s.dev.m.headerNumber(thread)); ok {
+		return n, thread
+	}
+	title, ok := thread.Find(func(n Node) bool {
+		return s.dev.m.inPackage(n) && n.Bounds.T >= 0 && n.Bounds.T < 260 && norm(n.Text) != "" &&
+			((s.dev.m.TitleID != "" && n.ID() == s.dev.m.TitleID) || n.Class == "android.widget.TextView")
+	})
+	if !ok {
+		return "", thread
+	}
+	x, y := title.Bounds.Center()
+	if err := s.dev.Tap(ctx, x, y); err != nil {
+		return "", thread
+	}
+	details, err := s.waitScreen(ctx, func(sc *Screen) bool {
+		_, hasCompose := s.dev.m.compose(sc)
+		return !hasCompose
+	})
+	number := ""
+	if err == nil {
+		for _, n := range details.Nodes {
+			if !s.dev.m.inPackage(n) {
+				continue
+			}
+			for _, t := range []string{n.Text, n.Desc} {
+				t = norm(t)
+				if t == "" || len(t) > 60 {
+					continue
+				}
+				if num, ok := NumberFromName(phoneInTextRe.FindString(t)); ok {
+					number = num
+					break
+				}
+			}
+			if number != "" {
+				break
+			}
+		}
+	}
+	_ = s.dev.Key(ctx, "KEYCODE_BACK")
+	back, err := s.waitScreen(ctx, func(sc *Screen) bool {
+		_, ok := s.dev.m.compose(sc)
+		return ok
+	})
+	if err != nil {
+		return number, thread
+	}
+	return number, back
 }

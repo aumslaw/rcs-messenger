@@ -24,8 +24,9 @@ func (e *Endpoint) SetPairing(p Pairer) *Endpoint {
 }
 
 type sendRequest struct {
-	To      string `json:"to"`
-	Message string `json:"message"`
+	To             string `json:"to"`
+	Message        string `json:"message"`
+	IdempotencyKey string `json:"idempotencyKey"`
 }
 
 type checkRequest struct {
@@ -39,7 +40,11 @@ func (e *Endpoint) Send(c *gin.Context) {
 		return
 	}
 
-	res, err := e.service.Send(c.Request.Context(), req.To, req.Message)
+	key := c.GetHeader("Idempotency-Key")
+	if key == "" {
+		key = req.IdempotencyKey
+	}
+	res, err := e.service.SendKeyed(c.Request.Context(), key, req.To, req.Message)
 	if err != nil {
 		httputil.Error(c, err)
 		return

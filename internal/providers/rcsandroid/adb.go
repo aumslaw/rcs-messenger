@@ -348,3 +348,41 @@ func (d *Device) HasInternet(ctx context.Context) bool {
 	}
 	return !seen
 }
+
+var wmSizeRe = regexp.MustCompile(`(?m)^(Physical|Override) size: (\d+)x(\d+)`)
+
+// DisplaySize is the display's size in pixels from `wm size` (the override
+// size when one is set). ok is false when the phone did not say.
+func (d *Device) DisplaySize(ctx context.Context) (w, h int, ok bool) {
+	out, err := d.sh(ctx, "wm size")
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, m := range wmSizeRe.FindAllStringSubmatch(out, -1) {
+		fmt.Sscan(m[2], &w)
+		fmt.Sscan(m[3], &h)
+		ok = w > 0 && h > 0
+		if m[1] == "Override" {
+			break
+		}
+	}
+	return w, h, ok
+}
+
+// FullScreen reports whether the Messages window in scr fills the display. An
+// unreadable display size counts as fine: this check may only refuse a send.
+func (d *Device) FullScreen(ctx context.Context, scr *Screen) bool {
+	dw, dh, ok := d.DisplaySize(ctx)
+	if !ok {
+		return true
+	}
+	r := scr.RootBounds()
+	rw, rh := r.R-r.L, r.B-r.T
+	if rw <= 0 || rh <= 0 {
+		return true
+	}
+	if rw > rh && dw < dh { // landscape
+		dw, dh = dh, dw
+	}
+	return rw*100 >= dw*95 && rh*100 >= dh*90
+}

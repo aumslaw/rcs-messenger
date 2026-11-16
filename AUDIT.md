@@ -67,11 +67,22 @@ finding below was checked against the code; the fixed ones have a test that fail
 | MEDIUM | `SUCCESS_UNVERIFIED` did not block the number. | It blocks like the SMS and unencrypted outcomes. | `TestClassify` (blocks list) |
 | n/a | "`Reload` can race the reconcile loop" was stale: both already take `connMu`. | No change needed. | |
 
-## Found, not fixed (decide before relying on it)
+## Fixed after that (resolve-all pass)
 
-- **A 30 s HTTP write timeout is shorter than a long send.** The caller may give up while the send still finishes and is recorded; a retry by the caller is then a new send. Needs an idempotency key from the caller.
-- **Android:** split-screen windows break the "which side is ours" test; inbound STOP is skipped for chats saved under a contact name, and message ids repeat when identical text scrolls off.
-- **Logs may still contain phone numbers** outside adb errors (those are now masked). All endpoints are unauthenticated (bind 127.0.0.1).
+| Sev | Problem | Fix | Test |
+|---|---|---|---|
+| HIGH | A caller retrying a send (timeout, hang-up) could start a second send; the HTTP write timeout (30 s) was shorter than a send. | `Idempotency-Key` header or `idempotencyKey` field: the same key never sends twice, in flight or after; bound to the number (422 on another). Sends run detached from the request. Write timeout 4 min. | `TestIdempotent*`, `TestSendRouteIdempotencyKeyReplaysAndBindsNumber` |
+| HIGH | Android: split-screen broke the "which side is ours" test. | `wm size` vs the window bounds; not full screen refuses `window_not_fullscreen` before typing. | `TestSplitScreenWindowIsRefusedWithNothingTyped` |
+| HIGH | Android: a STOP in a chat saved under a contact name was skipped. | The number is read from the chat title / details page; unresolved chats are recorded and the sender refuses them (`unresolved_chat`). | `TestStopInContactNamedChatOptsTheNumberOut`, `TestUnresolvedContactChatIsRecordedAndSendRefuses` |
+| MEDIUM | Android: identical text scrolling off made message ids repeat. | The id includes the number, the text, the bubble above and an occurrence count. | `TestIdenticalMessagesGetDistinctStableIDs` |
+| MEDIUM | Logs could contain phone numbers; endpoints had no auth. | Every log line is scrubbed of phone-number runs, fields are masked to the last two digits. `RCS_API_TOKEN` (bearer) guards every route but `/health`; a non-loopback `ADDR` without it refuses to start. | `TestLogLinesNeverCarryAFullNumber`, `TestTokenGuardsEveryRouteButHealth`, `TestOpenBindNeedsAToken` |
+
+## Remaining limits (not code defects)
+
+- **The web path has not run live** (pairing needs a phone camera): the wire format and Google login are unproven.
+- **Idempotency keys live in memory**: they do not survive a restart (the Results store has no table for them).
+- **Android, unverified on a real phone:** the contact-details navigation and `wm size` parsing are written against fakes. The top bubble on screen has no context above it, so a new identical message landing exactly there can be missed.
+- Pair page cannot be used from a browser once `RCS_API_TOKEN` is set (it needs the bearer header).
 
 ## Added after live runs (same day)
 

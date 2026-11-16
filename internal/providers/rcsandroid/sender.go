@@ -244,10 +244,20 @@ func (s *Sender) Send(ctx context.Context, to, message string, opts rcsdirect.Se
 	if !ok {
 		return nil, s.refused(ReasonChatNotOpen, chk)
 	}
+	// Split-screen or a floating window breaks taps and the left/right test.
+	if !s.dev.FullScreen(ctx, scr) {
+		_ = s.dev.ClearCompose(ctx)
+		return nil, s.refused(ReasonNotFullscreen, chk)
+	}
 	// The title bar must show the number we mean to text. A leftover task or a
 	// failed open must never type into someone else's chat.
 	if h := s.dev.m.headerNumber(scr); h != "" && !sameNumber(h, to) {
 		return nil, s.refused(ReasonWrongChat, chk)
+	}
+	// A chat saved under a contact name whose number the inbound poll could not
+	// read: a STOP from it would not opt anyone out, so do not text it.
+	if h := s.dev.m.headerNumber(scr); h == "" && s.isUnresolved(s.dev.m.headerTitle(scr)) {
+		return nil, s.refused(ReasonUnresolvedChat, chk)
 	}
 	// The settle read can be seconds old. Confirm encrypted again on the read
 	// taken right before typing: a chat that dropped back is refused here.
@@ -305,7 +315,7 @@ func (s *Sender) Send(ctx context.Context, to, message string, opts rcsdirect.Se
 	// read and recorded, or the number is never blocked and a retry duplicates.
 	tapErr := s.dev.Tap(ctx, bx, by)
 	if tapErr != nil {
-		logg.Error().Err(tapErr).Str("to", to).Msg("Android send tap returned an error; reading the thread to see whether it went")
+		logg.Error().Err(tapErr).Str("to", logg.Mask(to)).Msg("Android send tap returned an error; reading the thread to see whether it went")
 	}
 	s.last = s.cfg.Now()
 	ctx = context.WithoutCancel(ctx)
@@ -386,7 +396,7 @@ func (s *Sender) Send(ctx context.Context, to, message string, opts rcsdirect.Se
 		res.MessageType = 4
 	}
 	if res.Sent && after.Kind != KindEncrypted {
-		logg.Error().Str("to", to).Str("after", string(after.Kind)).Str("evidence", after.Evidence).
+		logg.Error().Str("to", logg.Mask(to)).Str("after", string(after.Kind)).Str("evidence", after.Evidence).
 			Msg("Android send went out but the chat does not read as encrypted afterwards")
 	}
 	return res, nil

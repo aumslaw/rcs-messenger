@@ -13,7 +13,7 @@ The rule behind all four: a text goes out only if the chat is confirmed end-to-e
 
 ## Result
 
-All four are done and tested on a real Android phone running Google Messages, with the limits listed at the end. 200 automated tests pass (3 more need a Postgres database and are skipped without one). Build, vet and the full suite pass with the race detector.
+All four are done and tested on a real Android phone running Google Messages, with the limits listed at the end. 215 automated tests pass (3 more need a Postgres database and are skipped without one). Build, vet and the full suite pass with the race detector.
 
 ## What I did
 
@@ -35,6 +35,8 @@ I ran four independent read-only reviews, one per area: the service and API laye
 | High | Web path: the capability check said "yes" on one flag alone, so a contact on carrier RCS without Google Messages could read as encrypted. | "Yes" only for the one record shape actually observed on Google Messages contacts. |
 | High | Web path: an old encrypted marker was trusted on its own, for example after a contact moved to an iPhone. | The marker must be backed by a current capability of "yes". |
 | High | Web path: a brand-new chat was sent on a prediction, before any encrypted marker existed. | Strict: a new chat is refused until the marker exists. |
+| High | A caller retry could start a second send; split-screen broke the Android window test; STOP in contact-named chats was skipped; identical messages repeated ids. | Idempotency keys and detached sends; full-screen check; number resolved from the chat; distinct ids. |
+| Medium | Logs carried phone numbers and the API had no auth. | Log scrubbing and masking; `RCS_API_TOKEN` bearer guard; non-loopback bind needs it. |
 | High | Web path: a lost session did not stop a send, and a send request that errored after it left could be retried into a duplicate. | `web_session_lost` refusal; the thread is re-read for the send id and a possible send is reported as sent, outcome unknown. |
 | Medium | `SUCCESS_UNVERIFIED` did not block the number. | It blocks like the other non-encrypted outcomes. |
 | High | Web path: if the phone accepted a send but reported no final status within the wait, the result said "not sent". The caller recorded FAILED and could retry into a duplicate, and a fall back to SMS went unflagged. Found by the simulation. | The result now says sent, outcome unknown, and the chat is re-read after the send so an unencrypted or SMS outcome is flagged and the number blocked. |
@@ -72,7 +74,7 @@ go run ./cmd/androidprobe check +15551234567    # read only, sends nothing
 
 - **The web-protocol path was simulated, not run live.** The whole send path (eligibility, settle wait, status matching, after-send re-read) runs against a scripted fake of the Google Messages client in `internal/providers/rcsphone/sim_test.go`: 13 refusal cases, each asserting that nothing was sent, plus sends, failures, a cancelled caller, serialised sends and a fresh chat that becomes encrypted. Breaking the key rules on purpose makes those tests fail. What the simulation cannot prove is that the real phone replies in the shapes the fake uses (the capability record shape comes from earlier real observations). That needs a paired Google session. The behavior change there is the strict rule for brand-new chats, so please review that one.
 - **"Automatically resend as text" must be turned off by hand on each phone.** The code can neither read nor change that setting. If it is on and the recipient's data drops after the tap, the phone could send the message as SMS. The number would then be flagged and blocked, but that message cannot be recalled.
-- Lower-priority items, each described in `AUDIT.md`: the HTTP write timeout is shorter than a long send (needs a caller idempotency key), inbound STOP is skipped for chats saved under a contact name, and message ids repeat when identical text scrolls off screen.
+- Everything found is fixed. What remains are limits, listed in `AUDIT.md` "Remaining limits": idempotency keys are in memory only, the Android contact-details navigation is untested on a real phone, and the pair page needs the bearer header when `RCS_API_TOKEN` is set.
 - Text is printable ASCII and line breaks only (Android's `input text` cannot type emoji or accents).
 
 ## Files
