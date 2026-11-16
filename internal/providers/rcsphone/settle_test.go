@@ -71,11 +71,27 @@ func TestSettleNeverSendsWhenTheBudgetRunsOutUnconfirmed(t *testing.T) {
 	}
 }
 
-func TestSettleSendsOnceTheLookupLandsAsYes(t *testing.T) {
-	check, calls := sequence(pendingCheck(CapabilityNotYet), pendingCheck(CapabilityNotYet), pendingCheck(CapabilityYes))
+// Strict (2026-11-13): a capability "yes" on a chat with no encrypted marker is a
+// prediction, not confirmation. Settle keeps waiting for the marker and refuses
+// when the budget ends; it sends only once the app has written the marker.
+func TestSettleDoesNotSendOnACapabilityPredictionAlone(t *testing.T) {
+	check, _ := sequence(pendingCheck(CapabilityNotYet), pendingCheck(CapabilityYes))
+	_, reason, err := settle(context.Background(), zerolog.Nop(), time.Millisecond, 20*time.Millisecond, check)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason != ErrE2EEPending.Error() {
+		t.Fatalf("reason = %q, want e2ee_pending: capability yes without an encrypted marker must never send", reason)
+	}
+}
+
+func TestSettleSendsOnceTheEncryptedMarkerExists(t *testing.T) {
+	enc := rcsCheck()
+	enc.E2EE, enc.E2EECapability = e2eeOn, CapabilityYes
+	check, calls := sequence(pendingCheck(CapabilityNotYet), pendingCheck(CapabilityYes), enc)
 	_, reason, err := settle(context.Background(), zerolog.Nop(), time.Millisecond, time.Second, check)
 	if err != nil || reason != "" {
-		t.Fatalf("reason = %q, err = %v, want eligible", reason, err)
+		t.Fatalf("reason = %q, err = %v, want eligible once the marker is there", reason, err)
 	}
 	if *calls != 3 {
 		t.Errorf("%d checks, want 3", *calls)

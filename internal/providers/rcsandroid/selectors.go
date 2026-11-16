@@ -32,6 +32,19 @@ type Selectors struct {
 	// Lock matches the resource id or description of the padlock that sits
 	// in the message box area of an encrypted chat.
 	Lock string `json:"lock"`
+	// SendEncrypted matches the send button's description once text is typed
+	// when the app will send end-to-end encrypted ("Send encrypted message" on a
+	// real phone). This is the final gate before the tap: the button is the
+	// app's own statement of what this send will be, it is in the compose row,
+	// and message text cannot forge it.
+	SendEncrypted string `json:"sendEncrypted"`
+	// EncLabel matches the end of a message's own description when the app
+	// labels that message end-to-end encrypted ("..., Read. End-to-end encrypted
+	// message"). It must be anchored to the END: the description is
+	// "<who> said <text> <time> ., <status>. <label>", so the message text can
+	// never be at the end. Used only to decide a long thread is worth typing
+	// into (the thread-start lock scrolls away); the send button decides.
+	EncLabel string `json:"encLabel"`
 	// Status* match the small status text under our outgoing message.
 	StatusSent    string `json:"statusSent"`
 	StatusFailed  string `json:"statusFailed"`
@@ -58,14 +71,21 @@ type Selectors struct {
 
 func DefaultSelectors() Selectors {
 	return Selectors{
-		Package:       "com.google.android.apps.messaging",
-		ComposeID:     "compose_message_text",
-		SendID:        "send_message_button_icon",
-		SendDesc:      `^send\b`,
-		HintSMS:       `^text message$`,
-		HintRCS:       `^rcs message$`,
-		Banner:        `end-to-end encrypted`,
-		Lock:          `(encrypted|padlock|^lock$|lock_icon|encryption)`,
+		Package:   "com.google.android.apps.messaging",
+		ComposeID: "compose_message_text",
+		SendID:    "send_message_button_icon",
+		SendDesc:  `^send\b`,
+		HintSMS:   `^text message$`,
+		HintRCS:   `^rcs message$`,
+		// Banner is supporting evidence only (see ReadChat): it never makes a chat
+		// encrypted on its own, because message text can contain the same words.
+		Banner: `this chat is now end-to-end encrypted`,
+		// Lock must match the padlock node itself (real phone: description
+		// "Lock icon"), anchored so it cannot match message text or a message
+		// label such as "..., End-to-end encrypted message".
+		Lock:          `^(lock icon|padlock|lock)$|(^|_)lock(_icon)?$`,
+		SendEncrypted: `^send encrypted message$`,
+		EncLabel:      `\., (?:[^.,]*\. )?end-to-end encrypted message$`,
 		StatusSent:    `^(sent|delivered|read)\b`,
 		StatusFailed:  `(not sent|failed|tap to try again|couldn.t send|not delivered)`,
 		StatusSending: `^(sending|now sending|queued)`,
@@ -103,7 +123,7 @@ func LoadSelectors(path string) (Selectors, error) {
 // matcher is Selectors with its patterns compiled.
 type matcher struct {
 	Selectors
-	sendDesc, hintSMS, hintRCS, banner, lock, sent, failed, sending, msgSMS, msgRCS, msgEnc, sendSMS *regexp.Regexp
+	sendDesc, hintSMS, hintRCS, banner, lock, sent, failed, sending, msgSMS, msgRCS, msgEnc, sendSMS, sendEnc, encLabel *regexp.Regexp
 }
 
 func newMatcher(s Selectors) (*matcher, error) {
@@ -117,7 +137,7 @@ func newMatcher(s Selectors) (*matcher, error) {
 		{&m.banner, "banner", s.Banner}, {&m.lock, "lock", s.Lock}, {&m.sent, "statusSent", s.StatusSent},
 		{&m.failed, "statusFailed", s.StatusFailed}, {&m.sending, "statusSending", s.StatusSending},
 		{&m.msgSMS, "msgSms", s.MsgSMS}, {&m.msgRCS, "msgRcs", s.MsgRCS}, {&m.msgEnc, "msgEncrypted", s.MsgEncrypted},
-		{&m.sendSMS, "sendSms", s.SendSMS},
+		{&m.sendSMS, "sendSms", s.SendSMS}, {&m.sendEnc, "sendEncrypted", s.SendEncrypted}, {&m.encLabel, "encLabel", s.EncLabel},
 	} {
 		re, err := regexp.Compile("(?i)" + p.expr)
 		if err != nil {

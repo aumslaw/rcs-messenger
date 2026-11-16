@@ -36,6 +36,10 @@ type fakePhone struct {
 	sendDescOverride string // what the send button says, whatever the hint says
 	tailOverride     string // the protocol tail on our sent message's description
 	echo             bool   // the other side echoes our text back (the emulator does)
+	oldMsg           string // an earlier, identical outgoing message already in the thread (status "Read")
+	dropSend         bool   // the send tap does not register: the text stays in the box
+	header           string // the number in the title bar ("" = a contact name, nothing to read)
+	offline          bool   // no validated internet connection
 }
 
 func newPhone(kinds ...Kind) *fakePhone {
@@ -76,6 +80,11 @@ func (p *fakePhone) Run(_ context.Context, args ...string) ([]byte, error) {
 	case "shell":
 		cmd := args[1]
 		switch {
+		case strings.HasPrefix(cmd, "dumpsys connectivity"):
+			if p.offline {
+				return []byte("NetworkAgentInfo{ni{WIFI CONNECTED extra: } Score(Policies : EVER_EVALUATED&IS_UNMETERED)}\nNetworkAgentInfo{ni{MOBILE[NR] CONNECTED extra: ims} Score(IS_VALIDATED)}\n"), nil
+			}
+			return []byte("NetworkAgentInfo{ni{WIFI CONNECTED extra: } Score(EVER_VALIDATED&IS_VALIDATED)}\n"), nil
 		case strings.HasPrefix(cmd, "dumpsys window"):
 			if p.locked {
 				return []byte("isKeyguardShowing=true\nmWakefulness=Awake"), nil
@@ -89,7 +98,7 @@ func (p *fakePhone) Run(_ context.Context, args ...string) ([]byte, error) {
 			var x, y int
 			fmt.Sscan(m[1], &x)
 			fmt.Sscan(m[2], &y)
-			if x >= 900 && x <= 1000 && y >= 2000 && y <= 2100 && p.compose != "" { // send button
+			if x >= 900 && x <= 1000 && y >= 2000 && y <= 2100 && p.compose != "" && !p.dropSend { // send button
 				p.sentMsg, p.compose = p.compose, ""
 				p.dumps = 0
 			}
@@ -151,8 +160,14 @@ func (p *fakePhone) dumpLocked() []byte {
 	if p.compose != "" {
 		text = strings.ReplaceAll(p.compose, "\n", "&#10;")
 	}
+	if p.header != "" {
+		nodes = append(nodes, node("android.widget.TextView", "", p.header, "", 200, 60, 600, 120))
+	}
 	nodes = append(nodes, node("android.widget.EditText", "com.google.android.apps.messaging:id/compose_message_text", text, "", 100, 2000, 900, 2100))
 	sendDesc := "Send message"
+	if k == KindEncrypted {
+		sendDesc = "Send encrypted message"
+	}
 	if k == KindSMS {
 		sendDesc = "Send SMS"
 	}
@@ -165,6 +180,10 @@ func (p *fakePhone) dumpLocked() []byte {
 		if !p.noBanner {
 			nodes = append(nodes, node("android.widget.TextView", "com.google.android.apps.messaging:id/conversation_banner", "RCS chat with Test. This chat is now end-to-end encrypted.", "", 100, 300, 980, 380))
 		}
+	}
+	if p.oldMsg != "" {
+		nodes = append(nodes, node("android.view.ViewGroup", "com.google.android.apps.messaging:id/message_content", "", "You said  "+p.oldMsg+"  ., Read. End-to-end encrypted message", 280, 400, 1040, 520))
+		nodes = append(nodes, node("android.widget.TextView", "com.google.android.apps.messaging:id/message_text", p.oldMsg, "", 300, 420, 1000, 500))
 	}
 	if p.sentMsg != "" {
 		tail := "Now"

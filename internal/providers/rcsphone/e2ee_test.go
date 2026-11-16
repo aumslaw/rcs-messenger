@@ -70,13 +70,18 @@ func TestEligibilityRequiresConfirmedEncryption(t *testing.T) {
 		wantOK     bool
 		wantReason string
 	}{
-		{"encrypted tombstone", e2eeOn, false, "", true, ""},
-		{"encrypted tombstone, capability not recorded", e2eeOn, false, CapabilityNotYet, true, ""},
+		{"encrypted tombstone and capability yes", e2eeOn, false, CapabilityYes, true, ""},
+		// An old encrypted tombstone alone is not trusted: a contact who moved to
+		// an iPhone keeps it. The current capability record has to agree.
+		{"encrypted tombstone, no capability read", e2eeOn, false, "", false, ErrE2EEPending.Error()},
+		{"encrypted tombstone, capability not recorded (contact moved to an iPhone)", e2eeOn, false, CapabilityNotYet, false, ErrE2EEPending.Error()},
+		{"encrypted tombstone, capability no", e2eeOn, false, CapabilityNo, false, ErrNotE2EE.Error()},
 		{"unencrypted tombstone", e2eeOff, false, "", false, ErrNotE2EE.Error()},
 		{"unencrypted tombstone even though capability says yes", e2eeOff, false, CapabilityYes, false, ErrNotE2EE.Error()},
 		{"no tombstone in reach", e2eeUnknown, false, "", false, ErrNotE2EE.Error()},
 		{"no tombstone in reach even though capability says yes", e2eeUnknown, false, CapabilityYes, false, ErrNotE2EE.Error()},
-		{"first draft, capability yes", e2eeUnknown, true, CapabilityYes, true, ""},
+		// Strict: a capability yes on a chat with no encrypted marker is only a prediction.
+		{"first draft, capability yes (prediction only)", e2eeUnknown, true, CapabilityYes, false, ErrE2EEPending.Error()},
 		{"first draft, lookup not landed (also what an iPhone reads)", e2eeUnknown, true, CapabilityNotYet, false, ErrE2EEPending.Error()},
 		{"first draft, probe failed so no capability", e2eeUnknown, true, "", false, ErrE2EEPending.Error()},
 		{"first draft, capability no", e2eeUnknown, true, CapabilityNo, false, ErrNotE2EE.Error()},

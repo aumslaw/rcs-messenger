@@ -20,27 +20,41 @@ The server listens on `127.0.0.1:8080` and creates its two tables on startup.
 | `RCS_WAIT_SECONDS` | `20` | How long a send waits for a delivery status, capped at 20 |
 | `RCS_MONITOR_SECONDS` | `60` | How often the health monitor checks the phone |
 | `RCS_ALLOWLIST_PHONES` | empty | Comma-separated E.164 numbers; when set, only these can be sent to |
+| `RCS_TRANSPORT` | `web` | `web` (Google Messages for web session) or `android` (drive the Messages app over adb). See below |
+| `RCS_ANDROID_*` | see [docs/ANDROID.md](docs/ANDROID.md) | Serial, Wi-Fi address, PIN, selector overrides, send spacing, settle time, inbound polling |
 | `DEBUG` | `false` | Debug logging |
+
+A setting that is set but does not parse (for example `RCS_DRY_RUN=yes`) stops the server at startup. It never silently falls back to its default.
 
 ## The send rule
 
-A message is sent only when the phone's own records confirm it will be end-to-end encrypted. There is no setting that relaxes this, and `RCS_REQUIRE_E2EE=false` stops the server from starting.
+A message is sent only when end-to-end encryption is confirmed for that chat. There is no setting that relaxes this, and `RCS_REQUIRE_E2EE=false` stops the server from starting. If it cannot be confirmed, nothing is sent: no plain RCS, no SMS.
+
+**Android transport** (the app's own screen is the authority):
+
+| What the phone shows | Result |
+|---|---|
+| Hint "RCS message" and the chat shows encryption (the lock in the thread header, or a message the app labels end-to-end encrypted), and after typing the send button reads exactly "Send encrypted message" | Send |
+| The send button reads anything else (plain RCS, "Send SMS", unknown) | Clear the box, refuse `e2ee_pending` |
+| Hint "Text message" (SMS) | Refuse `not_e2ee` |
+| RCS chat with no encryption shown (an iPhone on RCS) | Refuse `e2ee_pending` |
+| Chat for a different number, no internet, phone locked, screen unreadable | Refuse |
+
+**Web transport:**
 
 | What the phone says | Result |
 |---|---|
-| Chat has an encrypted protocol tombstone | Send |
-| Chat is an unfinalized first draft and the capability record reads `yes` | Send |
-| First draft, capability `not_yet` or the probe failed | Refuse as `e2ee_pending`, retryable. An iPhone on plain RCS stays here forever, so it is never sent to |
-| First draft, capability `no` | Refuse as `not_e2ee` |
-| Chat recorded as RCS without encryption | Refuse as `not_e2ee` |
-| No protocol tombstone in reach | Refuse as `not_e2ee` |
+| Chat has an encrypted protocol tombstone **and** the capability record reads `yes` (the exact record observed on Google Messages contacts) | Send |
+| Encrypted tombstone but capability `not_yet` (for example a contact who moved to an iPhone) | Refuse as `e2ee_pending`, retryable |
+| Unfinalized first draft, whatever the capability says | Refuse as `e2ee_pending`: a capability `yes` is a prediction, not confirmation. An iPhone on plain RCS stays here, so it is never sent to |
+| Capability `no`, or a chat recorded as RCS without encryption, or no tombstone in reach | Refuse as `not_e2ee` |
 | Chat is SMS, SMS/MMS send mode, RCS off on the SIM, read-only, phone offline | Refuse |
 
 After a send the chat is re-read as a second check. If the message went out unencrypted or as SMS anyway, it is logged at error level, recorded, and that number is never sent to again.
 
 ## Android transport (no Google web session)
 
-`RCS_TRANSPORT=android` sends by driving the Google Messages app on an Android phone over adb and reads the encrypted/plain/SMS answer off the screen before sending. Nothing expires, nothing is paired. Setup, settings, what is verified and what still needs a real RCS phone: [docs/ANDROID.md](docs/ANDROID.md). Try it without the server: `go run ./cmd/androidprobe check +15551234567`.
+`RCS_TRANSPORT=android` sends by driving the Google Messages app on an Android phone over adb. It reads the encrypted/plain/SMS answer off the screen before sending, and the send button's own label ("Send encrypted message") is the final gate at the moment of the tap. Nothing expires, nothing is paired. Setup, settings, what is verified and what still needs a real RCS phone: [docs/ANDROID.md](docs/ANDROID.md). Try it without the server: `go run ./cmd/androidprobe check +15551234567`.
 
 ## Pair a phone (web transport)
 
@@ -64,6 +78,8 @@ Every endpoint is documented in `bruno/`, including what each refusal reason mea
 ## Code
 
 - `cmd/server`: config, wiring and routes
+- `internal/providers/rcsandroid`: the Android transport (adb, screen reading, the send gate, incoming STOP replies)
+- `cmd/androidprobe`: check, dump, send and inbound against a real phone, without the server
 - `internal/providers/rcsphone`: the phone session, pairing, eligibility checks, sending, the contact capability lookup
 - `internal/providers/rcsdirect`: the request and result types shared by the layers
 - `internal/rcs`: the send policy, per-number send results, opt-out replies and the health monitor
@@ -73,6 +89,8 @@ Every endpoint is documented in `bruno/`, including what each refusal reason mea
 ```
 go test ./...
 ```
+
+Audit results and what changed: [AUDIT.md](AUDIT.md). Report: [docs/REPORT.md](docs/REPORT.md).
 
 The opt-out and results store tests need a real Postgres and are skipped without one:
 

@@ -50,8 +50,14 @@ func (c *Capability) State() CapabilityState {
 	switch {
 	case c == nil:
 		return ""
-	case c.Flag1 == 1:
+	case c.Flag1 == 1 && c.Flag2 == 1 && c.Version == "0x0201":
+		// Only the one record shape actually observed on Google Messages
+		// contacts counts as confirmation. Flag1 alone is not enough: a contact
+		// on carrier RCS without Google Messages could set it with another
+		// version and would be sent plain RCS.
 		return CapabilityYes
+	case c.Flag1 == 1:
+		return CapabilityNotYet // an unrecognised "yes" shape: never confirmation
 	case c.Flag2 == 0 && c.Version == "":
 		return CapabilityNotYet
 	}

@@ -14,7 +14,7 @@ Turn it on with `RCS_TRANSPORT=android`. The default (`web`) is unchanged.
    - SMS after the whole budget: refuse `not_e2ee`
    - screen not readable: refuse `screen_unreadable` / `chat_not_open`
 4. Type the message and read the box back. If it is not exactly what was asked, clear it and refuse `typing_mismatch`.
-5. Last check before the tap: the send button's own label. If it says SMS/MMS, clear and refuse. (Seen on a real screen: the button reads "Send SMS" in an SMS chat, and keeps that label after text is typed, when the hint is hidden.)
+5. Last check before the tap, the authority: the send button's own label. It must read exactly **"Send encrypted message"** (real phone). Anything else ("Send SMS", plain RCS, an unknown label) clears the box and refuses, whatever the thread looked like. (Seen on a real screen: the button reads "Send SMS" in an SMS chat, and keeps that label after text is typed, when the hint is hidden.)
 6. Tap send, then read the thread for our message and its status, and the protocol label the message itself carries (`You said <text> ., Now, SMS`).
 7. Re-read the chat. The result carries `After` (encrypted / plain / SMS) and `MessageType` (4 RCS, 1 SMS). The existing service turns that into `SUCCESS_E2EE`, `SUCCESS_RCS`, `SUCCESS_SMS` (number blocked), `FAILED`, as before. A message whose own label says SMS counts as SMS even if the chat reads encrypted.
 
@@ -71,21 +71,23 @@ Verified on a real Google Messages (Android 14 emulator, SMS only):
 - the whole path through the service layer (results recorded, SMS number blocked), with a simulated phone for the RCS and encrypted cases
 - incoming replies: a STOP sent from the emulator echoed back, was read off the list and thread, recorded as an opt-out in Postgres by the real server, and a later send to that number was refused `opted_out`
 
-**Not verified, needs one run on a real RCS phone** (an emulator has no carrier RCS, so these strings were never seen):
+**Verified on a real RCS phone (Moto G 2025, Google Messages, 2026-11-13):**
 
-- the empty-box hint of an RCS chat ("RCS message" is what the brief says) and the padlock that marks encryption (a node with an "encrypted" / "lock" description or id, in the message box area)
-- the thread line "this chat is now end-to-end encrypted"
-- how an encrypted message's own label reads (`You said <text> ., Now, <?>`)
-- the status wording for RCS ("Sent", "Delivered", "Read")
+- the empty-box hint of an RCS chat is "RCS message"; of an SMS chat, "Text message"
+- the padlock is a node with description "Lock icon" in the thread-start banner, next to "RCS chat with <number>" and "This chat is now end-to-end encrypted. Learn more". It scrolls out of view on long threads, so it is only a hint
+- an encrypted message's own label ends `, <status>. End-to-end encrypted message`; an incoming SMS ends `, Not end-to-end encrypted`
+- with text typed, the send button's description is "Send encrypted message" (encrypted chat) or "Send SMS". This is the final gate
+- status wording for our own messages: "Sending", then "Delivered", then "Read"
+- live sends into three encrypted chats were delivered with the encrypted label; an iPhone on plain RCS was refused `e2ee_pending`; SMS-only numbers were refused `not_e2ee`, with nothing typed
 
-Do this once with a phone in hand:
+If a different phone or a newer Messages version words any of this differently, change the selector, not the code. Do this once on a new phone:
 
-1. `androidprobe check <a Google Messages contact>` after waiting a minute, then `androidprobe dump <number>`. Find the padlock and the banner in the dump.
+1. `androidprobe check <a Google Messages contact>` after waiting a minute, then `androidprobe dump <number>`. Find the lock, the banner, and (with text typed) the send button in the dump.
 2. If `check` does not say ENCRYPTED RCS for a chat that is encrypted, put the real strings in a JSON file (only the keys that differ) and set `RCS_ANDROID_SELECTORS`:
    ```json
-   {"lock": "encrypted message", "banner": "end-to-end encrypted", "hintRcs": "^rcs message$"}
+   {"lock": "^lock icon$", "sendEncrypted": "^send encrypted message$", "hintRcs": "^rcs message$"}
    ```
-   Keys: `package, composeId, sendId, sendDesc, hintSms, hintRcs, banner, lock, statusSent, statusFailed, statusSending, bubbleId, messageContentId, msgSms, msgRcs, msgEncrypted, sendSms`. All patterns are case-insensitive regular expressions.
+   Keys: `package, composeId, sendId, sendDesc, sendEncrypted, encLabel, hintSms, hintRcs, banner, lock, statusSent, statusFailed, statusSending, bubbleId, messageContentId, msgSms, msgRcs, msgEncrypted, sendSms`. All patterns are case-insensitive regular expressions.
 3. Check an iPhone number: it must read PLAIN RCS and be refused `e2ee_pending`. Check an SMS-only number: SMS, refused `not_e2ee`.
 4. Send one test message to a Google Messages contact; it must come back `SUCCESS_E2EE`.
 5. Leave it a day and run `androidprobe health` / `check` again.
@@ -97,6 +99,7 @@ Do this once with a phone in hand:
 - **A send that cannot be confirmed:** if the message is in the thread but no final status shows, it is reported sent (`sent_unconfirmed`), not failed, so it is never retried into a duplicate.
 - **Chat flips to SMS between the check and the tap:** caught by the send-button label check; if it still goes out as SMS the message label exposes it and the number is blocked.
 - **Phone model differences:** the swipe that lifts the lock screen assumes a normal portrait phone. A phone with a different layout may need a different swipe.
+- **Repeat sends of identical text (found on the Moto G, 2026-11-13, FIXED):** `androidprobe send` printed `sent=true` while the text was still in the compose box and nothing new was in the thread (confirmed by screenshot). Cause: the thread already held identical older outgoing messages (one marked "Read"), and the reader took the old bubble for the new send. A send now counts as registered only once the text has left the compose box; otherwise the result is `send_not_registered` and the box is cleared. Tests: `TestOldIdenticalMessageIsNotMistakenForOurSend`, `TestRepeatedMessageThatDoesSendIsReportedSent`. The tap itself missed because the phone was in landscape (full-screen keyboard, see above); the sender now locks portrait.
 - **Several phones:** one Sender drives one phone. More numbers means more phones, each with its own `RCS_ANDROID_SERIAL` and process.
 
 ## Research notes (the questions in the brief)
@@ -105,4 +108,11 @@ Do this once with a phone in hand:
 - **Accessibility-service app on the phone:** would do the same with no computer, but needs a sideloaded app, an accessibility grant that Android can revoke, and can't be restarted remotely. The adb route reads the same screen, so the selectors carry over. Worth it only if a computer next to the phone is not acceptable.
 - **Beeper / mautrix-gmessages session longevity:** the bridge's docs describe QR pairing as the normal method and the Google-account login as a fallback that needs cookies, and recommend a private window so the browser does not rotate them. No source found states how long a cookie login lasts. See [docs.mau.fi gmessages authentication](https://docs.mau.fi/bridges/go/gmessages/authentication.html). This is the problem the Android route avoids.
 - **Is the compose hint reliable before sending:** on the screens tested, yes: the hint reads "Text message" for SMS, and a new chat starts there and changes once the phone's lookup lands, hence the settle loop. The RCS and encrypted wording is the part still to confirm on a real phone (above). Google's help pages also say a lock shows on the send button while composing and the banner reads "RCS chat with <contact>"; see [Check if a conversation is end-to-end encrypted](https://support.google.com/messages/answer/10252671). The lock selector is configurable for that reason.
+- **Verified on a real phone (2026-11-12, Moto G 2025, Google Messages):** `androidprobe health` reports ready; `check` on a plain-SMS contact (an iPhone) reads `transport: SMS`, `e2ee: off`, hint "Text message", header "Texting with <number> (SMS/MMS)", no lock, no banner, and the sender refuses with `not_e2ee`. Also verified read-only on two existing end-to-end encrypted RCS chats on the same phone (`check` sends nothing): hint "RCS message"; thread line "RCS chat with <number>"; a node with description "Lock icon"; banner "This chat is now end-to-end encrypted. Learn more"; per-message label `You said <text> <date>, Read. End-to-end encrypted message`. `check` reads both as `ENCRYPTED RCS`, eligible to send. An unencrypted incoming SMS is labelled `<number> said <text> <time> ., Not end-to-end encrypted`. The default selectors match all of this with no change. Live sends into encrypted chats were also done (Kyle's and Amy's chats, 2026-11-13): both went out as encrypted messages (`End-to-end encrypted message` label, send button `Send encrypted message`). Findings from those runs:
+  - **The "Lock icon" node is part of the thread-start banner, not the compose row.** It is on screen only while the top of the thread is visible (a short or new chat). A longer thread scrolls it away, so the lock cannot be the live signal. Before typing, a chat now also counts as worth trying when a message carries the app's own end-to-end-encrypted label (anchored to the end of its description, which message text cannot reach). The send button, which stays on screen, is the final gate.
+  - **Landscape breaks the send tap.** Android's keyboard goes full screen with its own SEND button, so the tap on the app's send button misses and the text stays in the box. The sender now locks the phone to portrait itself.
+  - **No internet means messages sit in "Sending" forever.** With Wi-Fi or mobile data not validated, RCS cannot register or send; with "Automatically resend as text" off the messages stay queued (never fall back to SMS). They send when data returns. Other phones then see this number as SMS-only (an incoming text from a friend's phone arrived as plain SMS for that reason). Check `dumpsys connectivity` for VALIDATED on the data network if sends stall.
+  - Still unverified: the Sent / Delivered wording of a message we send (both test messages were still "Sending" because of the missing data connection).
+- **Lock position (the press-report concern did not show up on this phone):** the lock was present in the uiautomator dump of real encrypted chats (see above), so the layout described by the 2026 reports was not in effect here. A different Google Messages version may differ.
+- **Lock may have moved (unconfirmed, from 2026 press reports):** Google's help pages put the lock on the send button, but 9to5Google reports a layout test that moves the timestamp and the encryption lock behind a swipe left. If the lock is not in the uiautomator dump, the detector falls back to the "end-to-end encrypted" banner; with neither it returns `e2ee_pending` and refuses the send. That is a refusal, never a send. Do NOT widen `banner` to match "RCS chat with": that line appears on non-encrypted RCS chats (for example with an iPhone) and would read as encrypted.
 - **"Automatically resend as text":** turn it off on the phone (setup step 2). adb cannot change it.

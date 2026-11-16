@@ -1,6 +1,7 @@
 package rcsandroid
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -62,12 +63,28 @@ func (m *matcher) ReadChat(s *Screen) ChatView {
 		v.ComposeText = c.Text
 	}
 
+	// The thread line is supporting evidence only. Message text (a customer's
+	// own reply, or a message label like "Not end-to-end encrypted") can
+	// contain the same words, so it can never make a chat encrypted.
 	banner, hasBanner := s.Find(func(n Node) bool {
-		return m.inPackage(n) && (m.banner.MatchString(norm(n.Text)) || m.banner.MatchString(norm(n.Desc)))
+		return m.inPackage(n) && n.Class != "android.widget.EditText" &&
+			(m.banner.MatchString(norm(n.Text)) || m.banner.MatchString(norm(n.Desc)))
 	})
+	// The padlock is a node of its own. Message bubbles and message labels are
+	// never searched: their description carries the message text.
 	lock, hasLock := s.Find(func(n Node) bool {
 		return m.inPackage(n) && n.Class != "android.widget.EditText" &&
+			n.ID() != m.BubbleID && n.ID() != m.MessageContentID &&
 			(m.lock.MatchString(n.ID()) || m.lock.MatchString(norm(n.Desc)))
+	})
+
+	// A long thread has scrolled the thread-start lock away. The app also labels
+	// each message ("..., Read. End-to-end encrypted message"); the pattern is
+	// anchored to the end of the description, which message text cannot reach.
+	// A stale label proves nothing about the chat NOW, so this only decides that
+	// typing is worth trying: the send button is the gate (see Send).
+	label, hasLabel := s.Find(func(n Node) bool {
+		return m.inPackage(n) && n.ID() == m.BubbleID && m.encLabel.MatchString(norm(n.Desc))
 	})
 
 	switch {
@@ -75,15 +92,16 @@ func (m *matcher) ReadChat(s *Screen) ChatView {
 		v.Kind, v.Evidence = KindSMS, `message box hint "`+v.Hint+`"`
 	case m.hintRCS.MatchString(v.Hint) && hasLock:
 		v.Kind, v.Evidence = KindEncrypted, `message box hint "`+v.Hint+`" with padlock ("`+firstNonEmpty(lock.Desc, lock.ID())+`")`
-	case m.hintRCS.MatchString(v.Hint) && hasBanner:
-		v.Kind, v.Evidence = KindEncrypted, `message box hint "`+v.Hint+`" and thread line "`+norm(firstNonEmpty(banner.Text, banner.Desc))+`"`
+	case m.hintRCS.MatchString(v.Hint) && hasLabel:
+		v.Kind, v.Evidence = KindEncrypted, `message box hint "`+v.Hint+`" and a message the app labels end-to-end encrypted ("`+tailOf(norm(label.Desc))+`"); the send button is the final check`
 	case m.hintRCS.MatchString(v.Hint):
 		v.Kind, v.Evidence = KindRCS, `message box hint "`+v.Hint+`", no padlock`
-	case hasBanner:
-		// Text is typed in the box, so the hint is not readable; the thread
-		// line alone is weaker evidence than the hint, so say so.
-		v.Kind, v.Evidence = KindEncrypted, `thread line "`+norm(firstNonEmpty(banner.Text, banner.Desc))+`" (hint hidden by typed text)`
+		if hasBanner {
+			v.Evidence += ` (thread line "` + norm(firstNonEmpty(banner.Text, banner.Desc)) + `" present but not enough)`
+		}
 	default:
+		// No readable hint: text is typed in the box, or the screen is not a
+		// chat. Never guess encrypted from the thread alone.
 		v.Evidence = "hint not readable"
 	}
 	return v
@@ -103,6 +121,8 @@ const (
 	ReasonUnreadable     = "screen_unreadable"
 	ReasonChatNotOpen    = "chat_not_open" // the app did not show a chat
 	ReasonPhoneLocked    = "phone_locked"
+	ReasonPhoneOffline   = "phone_offline" // no validated internet: RCS cannot send, messages would queue forever
+	ReasonWrongChat      = "wrong_chat"    // the open chat is for a different number
 	ReasonUnsupported    = "unsupported_text"
 	ReasonTypingMismatch = "typing_mismatch"
 )
@@ -204,7 +224,10 @@ func (m *matcher) ReadSend(s *Screen, text string) SentMessage {
 
 	// The small status line under the message, when the app shows one.
 	below := s.FindAll(func(n Node) bool {
+		// Never a message bubble or label: their text is what the customer or we
+		// typed, and "Payment failed" or "Read our menu" must not set the status.
 		return m.inPackage(n) && n.Bounds.T >= bubble.Bounds.T && n.Text != "" &&
+			n.ID() != m.BubbleID && n.ID() != m.MessageContentID &&
 			(m.sent.MatchString(norm(n.Text)) || m.failed.MatchString(norm(n.Text)) || m.sending.MatchString(norm(n.Text)))
 	})
 	sort.SliceStable(below, func(i, j int) bool { return below[i].Bounds.T < below[j].Bounds.T })
@@ -220,4 +243,47 @@ func (m *matcher) ReadSend(s *Screen, text string) SentMessage {
 		}
 	}
 	return res
+}
+
+// tailOf is the app-generated end of a message description, for evidence text.
+func tailOf(desc string) string {
+	if i := strings.LastIndex(desc, " ., "); i >= 0 {
+		return desc[i+4:]
+	}
+	return desc
+}
+
+var headerNumRe = regexp.MustCompile(`^\+?[\d\s().\-]{10,}$`)
+
+// headerNumber is the number in the chat's title bar, or "" when the chat is
+// saved under a contact name (nothing to compare).
+func (m *matcher) headerNumber(s *Screen) string {
+	for _, n := range s.Nodes {
+		if m.inPackage(n) && n.Bounds.T >= 0 && n.Bounds.T < 260 && headerNumRe.MatchString(strings.TrimSpace(n.Text)) {
+			return digitsOf(n.Text)
+		}
+	}
+	return ""
+}
+
+func digitsOf(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// sameNumber compares the last ten digits, so +1 prefixes and formatting do not matter.
+func sameNumber(a, b string) bool {
+	a, b = digitsOf(a), digitsOf(b)
+	if len(a) > 10 {
+		a = a[len(a)-10:]
+	}
+	if len(b) > 10 {
+		b = b[len(b)-10:]
+	}
+	return a != "" && a == b
 }

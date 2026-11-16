@@ -3,6 +3,8 @@ package rcs
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -213,5 +215,84 @@ func TestNormalizeNumber(t *testing.T) {
 		if _, err := NormalizeNumber(in); !errors.Is(err, ErrBadNumber) {
 			t.Errorf("NormalizeNumber(%q) should fail", in)
 		}
+	}
+}
+
+// recordingResults refuses to record on a cancelled context, like a real database
+// driver would, and remembers what it was given.
+type recordingResults struct {
+	recs []SendRecord
+}
+
+func (r *recordingResults) Record(ctx context.Context, rec SendRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.recs = append(r.recs, rec)
+	return nil
+}
+func (r *recordingResults) Blocked(context.Context, string) (bool, error) { return false, nil }
+func (r *recordingResults) Recent(context.Context, string, int) ([]SendRecord, error) {
+	return r.recs, nil
+}
+
+// The caller disconnects while the phone is sending. The outcome (here: the phone
+// fell back to SMS) must still be written, or the number is never blocked.
+func TestOutcomeIsRecordedEvenWhenTheCallerWentAway(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &fakeSender{enabled: true, result: &rcsdirect.SendResult{Sent: true, MessageType: 1, FinalStatus: "Sent"}}
+	rr := &recordingResults{}
+	s := NewService(&cancellingSender{fakeSender: f, cancel: cancel}, Config{Enabled: true, Wait: time.Second})
+	s.SetResults(rr)
+	if _, err := s.Send(ctx, "+15551234567", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if len(rr.recs) != 1 || rr.recs[0].Outcome != OutcomeSuccessSMS {
+		t.Fatalf("the SUCCESS_SMS outcome must be recorded despite the cancelled caller: %+v", rr.recs)
+	}
+}
+
+type cancellingSender struct {
+	*fakeSender
+	cancel context.CancelFunc
+}
+
+func (c *cancellingSender) Send(ctx context.Context, to, msg string, o rcsdirect.SendOptions) (*rcsdirect.SendResult, error) {
+	res, err := c.fakeSender.Send(ctx, to, msg, o)
+	c.cancel() // the caller goes away while the send is in flight
+	return res, err
+}
+
+// Two requests for the same number must not both pass the checks before either
+// has recorded anything: sends to one number run one at a time.
+type slowSender struct {
+	*fakeSender
+	active, max int32
+}
+
+func (s *slowSender) Send(ctx context.Context, to, msg string, o rcsdirect.SendOptions) (*rcsdirect.SendResult, error) {
+	n := atomic.AddInt32(&s.active, 1)
+	for {
+		m := atomic.LoadInt32(&s.max)
+		if n <= m || atomic.CompareAndSwapInt32(&s.max, m, n) {
+			break
+		}
+	}
+	time.Sleep(30 * time.Millisecond)
+	atomic.AddInt32(&s.active, -1)
+	return &rcsdirect.SendResult{Sent: true, MessageType: 4, FinalStatus: "Sent", After: &rcsdirect.Check{E2EE: "on"}}, nil
+}
+
+func TestSendsToOneNumberRunOneAtATime(t *testing.T) {
+	ss := &slowSender{fakeSender: &fakeSender{enabled: true}}
+	s := NewService(ss, Config{Enabled: true, Wait: time.Second})
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); _, _ = s.Send(context.Background(), "+15551234567", "hello") }()
+	}
+	wg.Wait()
+	if ss.max != 1 {
+		t.Fatalf("%d sends to one number ran at once, want 1", ss.max)
 	}
 }

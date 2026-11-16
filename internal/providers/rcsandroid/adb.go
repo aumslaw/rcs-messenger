@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -39,7 +40,7 @@ func (r ExecRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 		if msg == "" {
 			msg = strings.TrimSpace(out.String())
 		}
-		return out.Bytes(), fmt.Errorf("adb %s: %w: %s", strings.Join(args, " "), err, msg)
+		return out.Bytes(), fmt.Errorf("adb %s: %w: %s", redactArgs(args), err, msg)
 	}
 	return out.Bytes(), nil
 }
@@ -149,8 +150,17 @@ func pause(ctx context.Context, d time.Duration) {
 // KeepAwake makes the phone stay on while plugged in, so the screen is there
 // to read.
 func (d *Device) KeepAwake(ctx context.Context) error {
-	_, err := d.sh(ctx, "settings put global stay_on_while_plugged_in 7")
-	return err
+	if _, err := d.sh(ctx, "settings put global stay_on_while_plugged_in 7"); err != nil {
+		return err
+	}
+	// Portrait, locked. In landscape Android's keyboard goes full screen with its
+	// own SEND button, so the sender's tap on the app's send button misses and the
+	// text stays in the box (seen on the Moto G, 2026-11-13). Best effort: a phone
+	// that refuses the setting still works if it is held upright.
+	_, _ = d.sh(ctx, "settings put system accelerometer_rotation 0")
+	_, _ = d.sh(ctx, "settings put system user_rotation 0")
+	_, _ = d.sh(ctx, "cmd window user-rotation lock 0")
+	return nil
 }
 
 // OpenChat opens the Messages conversation for number, starting from a clean
@@ -295,4 +305,46 @@ func (d *Device) Info(ctx context.Context) (Info, error) {
 		return in, ErrOffline
 	}
 	return in, nil
+}
+
+var smsURIRe = regexp.MustCompile(`sms:[^\s'"]+`)
+
+// redactArgs is the argument list for error text. Typed message text, the lock
+// PIN and the customer's number must not end up in logs or HTTP responses.
+func redactArgs(args []string) string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		switch {
+		case strings.Contains(a, "input text"):
+			out[i] = "input text <redacted>"
+		default:
+			out[i] = smsURIRe.ReplaceAllString(a, "sms:<number>")
+		}
+	}
+	return strings.Join(out, " ")
+}
+
+// HasInternet reports whether the phone has a working (validated) Wi-Fi or
+// mobile data connection. With none, RCS cannot register or send, and messages
+// sit in "Sending" until it returns. An unreadable answer counts as fine: this
+// check may only ever refuse a send, never invent a problem.
+func (d *Device) HasInternet(ctx context.Context) bool {
+	out, err := d.sh(ctx, "dumpsys connectivity")
+	if err != nil || strings.TrimSpace(string(out)) == "" {
+		return true
+	}
+	seen := false
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, "NetworkAgentInfo") || strings.Contains(line, "extra: ims") {
+			continue
+		}
+		if !strings.Contains(line, "WIFI") && !strings.Contains(line, "MOBILE") {
+			continue
+		}
+		seen = true
+		if strings.Contains(line, "IS_VALIDATED") {
+			return true
+		}
+	}
+	return !seen
 }

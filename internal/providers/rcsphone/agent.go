@@ -36,14 +36,32 @@ var (
 	ErrRCSPending   = errors.New("rcs_pending")
 	ErrRCSOffOnSIM  = errors.New("rcs_disabled_on_sim")
 	ErrPhoneOffline = errors.New("phone_not_responding")
+	ErrSessionLost  = errors.New("web_session_lost")
 	ErrNotActive    = errors.New("session_not_active")
 	ErrReadOnly     = errors.New("conversation_read_only")
 	ErrBadNumber    = errors.New("bad_number")
 )
 
+// gmClient is the part of libgm's client the Agent uses. It exists so the
+// send path can be run against a scripted fake in tests; production passes
+// *libgm.Client.
+type gmClient interface {
+	IsConnected() bool
+	IsLoggedIn() bool
+	Disconnect()
+	GetOrCreateConversation(context.Context, *gmproto.GetOrCreateConversationRequest) (*gmproto.GetOrCreateConversationResponse, error)
+	GetConversationType(context.Context, string) (*gmproto.GetConversationTypeResponse, error)
+	GetConversation(context.Context, string) (*gmproto.Conversation, error)
+	FetchMessages(context.Context, string, int64, *gmproto.Cursor) (*gmproto.ListMessagesResponse, error)
+	SendMessage(context.Context, *gmproto.SendMessageRequest) (*gmproto.SendMessageResponse, error)
+	MarkRead(context.Context, string, string) error
+	SetTyping(context.Context, string, *gmproto.SIMPayload) error
+	SetActiveSession(context.Context) error
+}
+
 type Agent struct {
 	log zerolog.Logger
-	cli *libgm.Client
+	cli gmClient
 
 	mu      sync.Mutex
 	sims    map[string]*gmproto.SIMCard // by SIM participant ID
@@ -53,10 +71,12 @@ type Agent struct {
 	convNumbers map[string]string
 	onInbound   func(from, text, messageID string)
 	persist     func(*libgm.AuthData)
+	authData    func() *libgm.AuthData // the client's current tokens, for persist
 
 	phoneResponding atomic.Bool
 	sessionActive   atomic.Bool
 	lastError       atomic.Pointer[string]
+	sessionLost     atomic.Bool // the phone unpaired us or the connection died for good
 
 	sendLock sync.Mutex // one send at a time per phone
 }
@@ -98,16 +118,18 @@ func (a *Agent) handleEvent(raw any) {
 		a.phoneResponding.Store(true)
 		a.log.Info().Msg("phone responding again")
 	case *events.AuthTokenRefreshed:
-		if a.persist != nil {
-			a.persist(a.cli.AuthData)
+		if a.persist != nil && a.authData != nil {
+			a.persist(a.authData())
 		}
 	case *events.ListenFatalError:
 		msg := fmt.Sprintf("fatal connection error: %v", evt.Error)
 		a.lastError.Store(&msg)
+		a.sessionLost.Store(true)
 		a.log.Error().Err(evt.Error).Msg("fatal connection error")
 	case *gmproto.RevokePairData:
 		msg := "the phone unpaired this session - pair again"
 		a.lastError.Store(&msg)
+		a.sessionLost.Store(true)
 		a.log.Error().Msg(msg)
 	default:
 		a.log.Debug().Type("event", raw).Msg("event")
@@ -354,7 +376,8 @@ func (a *Agent) Check(ctx context.Context, rawTo string) (*CheckResult, error) {
 // about a minute. A send re-checks for this long before giving up, and a
 // refusal that can still change is reported as retryable so the caller can
 // come back later.
-const (
+// vars, not consts, so the simulation tests can run them in milliseconds.
+var (
 	settleBudget = 15 * time.Second
 	settleDelay  = 2 * time.Second
 )
@@ -456,14 +479,24 @@ func eligibility(c *CheckResult) (bool, string) {
 
 	switch {
 	case c.E2EE == e2eeOn:
-		return true, ""
-	case c.E2EE == e2eeOff:
-		return false, ErrNotE2EE.Error()
-	case c.e2eePending:
+		// An old encrypted tombstone is not trusted on its own: a contact who
+		// moved to an iPhone keeps it until the phone writes a switch
+		// tombstone. The phone's current capability record must agree.
 		switch c.E2EECapability {
 		case CapabilityYes:
 			return true, ""
 		case CapabilityNo:
+			return false, ErrNotE2EE.Error()
+		}
+		return false, ErrE2EEPending.Error()
+	case c.E2EE == e2eeOff:
+		return false, ErrNotE2EE.Error()
+	case c.e2eePending:
+		// A new chat has no encrypted marker yet; the marker is only written once
+		// the app opens the thread or sends in it. A capability "yes" is a
+		// prediction, not confirmation, and a message cannot be recalled if the
+		// prediction is wrong. Strict: refuse until the marker exists.
+		if c.E2EECapability == CapabilityNo {
 			return false, ErrNotE2EE.Error()
 		}
 		return false, ErrE2EEPending.Error()
@@ -497,6 +530,9 @@ func (a *Agent) Send(ctx context.Context, rawTo, text string, wait time.Duration
 	a.sendLock.Lock()
 	defer a.sendLock.Unlock()
 
+	if a.sessionLost.Load() || !a.cli.IsConnected() || !a.cli.IsLoggedIn() {
+		return nil, &RefusedError{Reason: ErrSessionLost.Error()}
+	}
 	if !a.phoneResponding.Load() {
 		return nil, &RefusedError{Reason: ErrPhoneOffline.Error()}
 	}
@@ -537,10 +573,19 @@ func (a *Agent) Send(ctx context.Context, rawTo, text string, wait time.Duration
 		ForceRCS: true,
 	}
 	resp, err := a.cli.SendMessage(ctx, req)
+	res := &SendResult{TmpID: tmpID, Check: chk, StatusHistory: []string{}}
 	if err != nil {
+		// The request may have left before it failed (a timeout, a dropped
+		// connection). Look for our message in the thread before saying nothing
+		// went out: "not sent" gets retried into a duplicate.
+		if a.sendLanded(ctx, chk.ConversationID, tmpID) != landedNo {
+			res.Sent = true
+			res.FinalStatus = "outcome_unknown: send request failed (" + err.Error() + ") but the message may have gone out"
+			res.After = a.verifyAfterSend(ctx, rawTo)
+			return res, nil
+		}
 		return nil, fmt.Errorf("send request failed: %w", err)
 	}
-	res := &SendResult{TmpID: tmpID, Check: chk, StatusHistory: []string{}}
 	if resp.GetStatus() != gmproto.SendMessageResponse_SUCCESS {
 		res.FinalStatus = "SEND_REQUEST_" + resp.GetStatus().String()
 		return res, nil
@@ -548,12 +593,56 @@ func (a *Agent) Send(ctx context.Context, rawTo, text string, wait time.Duration
 
 	timeout := time.After(wait)
 	if err := awaitStatus(ctx, updates, timeout, res); err != nil {
-		return res, err
+		// The phone accepted the request, so the message is on its way. Returning
+		// an error here would be recorded as "nothing went out" and retried into
+		// a duplicate. Say what is true: sent, outcome unknown.
+		res.Sent = true
+		res.FinalStatus = "outcome_unknown: " + err.Error()
+		return res, nil
+	}
+	if !res.Sent && !sendFailed(res.FinalStatus) {
+		// The phone accepted the request and neither delivered nor failed it
+		// within the wait (no status at all, or only "sending"). The message
+		// can still go out. Reporting "not sent" would be recorded as FAILED and
+		// retried into a duplicate, and a fall back to SMS would go unflagged.
+		res.Sent = true
+		res.FinalStatus = "outcome_unknown: no delivery status within the wait (last: " + res.FinalStatus + ")"
 	}
 	if res.Sent {
 		res.After = a.verifyAfterSend(ctx, rawTo)
 	}
 	return res, nil
+}
+
+type landed int
+
+const (
+	landedNo landed = iota // the thread was read and holds no such message
+	landedYes
+	landedUnknown // the thread could not be read
+)
+
+// sendLanded looks for the message with tmpID in the conversation. It uses a
+// fresh context: the caller's may be the very thing that just failed.
+func (a *Agent) sendLanded(ctx context.Context, convID, tmpID string) landed {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), verifyTimeout)
+	defer cancel()
+	resp, err := a.cli.FetchMessages(rctx, convID, 20, nil)
+	if err != nil {
+		return landedUnknown
+	}
+	for _, m := range resp.GetMessages() {
+		if m.GetTmpID() == tmpID {
+			return landedYes
+		}
+	}
+	return landedNo
+}
+
+// sendFailed reports whether status is one of the phone's definite failures.
+func sendFailed(status string) bool {
+	v, ok := gmproto.MessageStatusType_value[status]
+	return ok && isSendFailure(gmproto.MessageStatusType(v))
 }
 
 // awaitStatus collects the phone's status updates for a send until it is
@@ -592,7 +681,7 @@ func awaitStatus(ctx context.Context, updates <-chan *gmproto.Message, timeout <
 
 // After a send, the phone gets this long to write down how the chat
 // finalized before the result is returned without it.
-const (
+var (
 	verifyAttempts = 3
 	verifyDelay    = 2 * time.Second
 	verifyTimeout  = 10 * time.Second

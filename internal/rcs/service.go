@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zagnu-labs/rcs-messenger/internal/logg"
@@ -32,6 +33,7 @@ type sender interface {
 }
 
 type Service struct {
+	locks     sync.Map // number -> *sync.Mutex
 	client    sender
 	blocker   Blocker
 	results   Results
@@ -88,11 +90,22 @@ type Result struct {
 	After       *rcsdirect.Check `json:"after,omitempty"` // the chat re-read once the message was out
 }
 
+// numberLock serialises everything for one number: the opt-out and block checks,
+// the send and the recording of its outcome. Without it two requests for the same
+// number can both pass the checks before either has recorded anything.
+func (s *Service) numberLock(to string) *sync.Mutex {
+	m, _ := s.locks.LoadOrStore(to, &sync.Mutex{})
+	return m.(*sync.Mutex)
+}
+
 func (s *Service) Send(ctx context.Context, rawTo, message string) (*Result, error) {
 	to, err := s.gate(rawTo)
 	if err != nil {
 		return nil, err
 	}
+	nl := s.numberLock(to)
+	nl.Lock()
+	defer nl.Unlock()
 	if strings.TrimSpace(message) == "" {
 		return nil, emptyMessageErr()
 	}
@@ -222,6 +235,10 @@ func (s *Service) record(ctx context.Context, r SendRecord) {
 	if s.results == nil {
 		return
 	}
+	// The caller may be gone by now (HTTP disconnect during a long send). The
+	// outcome still has to be written, or a number that must be blocked is not.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
 	if err := s.results.Record(ctx, r); err != nil {
 		logg.Error().Err(err).Str("to", r.Phone).Str("outcome", string(r.Outcome)).
 			Msg("RCS send outcome could not be recorded")

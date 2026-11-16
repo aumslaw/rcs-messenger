@@ -47,8 +47,10 @@ func (e *Endpoint) Send(c *gin.Context) {
 	switch {
 	case res.DryRun:
 		httputil.OK(c, "dry run, nothing sent", res)
+	case res.Sent && res.Outcome == rcs.OutcomeSuccessE2EE:
+		httputil.OK(c, "sent, end-to-end encrypted", res)
 	case res.Sent:
-		httputil.OK(c, "sent", res)
+		httputil.OK(c, "sent, but not confirmed end-to-end encrypted: outcome "+string(res.Outcome), res)
 	default:
 		httputil.OK(c, "send did not complete: "+res.FinalStatus, res)
 	}

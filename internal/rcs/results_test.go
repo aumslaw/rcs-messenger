@@ -62,12 +62,12 @@ func TestClassify(t *testing.T) {
 		})
 	}
 
-	for _, o := range []Outcome{OutcomeSuccessRCS, OutcomeSuccessSMS} {
+	for _, o := range []Outcome{OutcomeSuccessRCS, OutcomeSuccessSMS, OutcomeUnverified} {
 		if !o.Blocks() {
 			t.Errorf("%s must block the number", o)
 		}
 	}
-	for _, o := range []Outcome{OutcomeSuccessE2EE, OutcomeUnverified, OutcomeFailed} {
+	for _, o := range []Outcome{OutcomeSuccessE2EE, OutcomeFailed} {
 		if o.Blocks() {
 			t.Errorf("%s must not block the number", o)
 		}

@@ -2,6 +2,7 @@ package rcsandroid
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -93,7 +94,12 @@ func TestPollInboundDeliversNewIncomingMessagesOnce(t *testing.T) {
 	s := newSender(newPhone(KindSMS), newClock(), func(c *Config) { c.Runner = r })
 	var mu sync.Mutex
 	var msgs []got
-	s.OnInbound(func(from, text, id string) { mu.Lock(); msgs = append(msgs, got{from, text, id}); mu.Unlock() })
+	s.OnInbound(func(from, text, id string) error {
+		mu.Lock()
+		msgs = append(msgs, got{from, text, id})
+		mu.Unlock()
+		return nil
+	})
 	ctx := context.Background()
 
 	n, err := s.PollInbound(ctx)
@@ -144,8 +150,9 @@ func TestStopReplyBlocksTheNumberThroughTheService(t *testing.T) {
 	s := newSender(newPhone(KindSMS), newClock(), func(c *Config) { c.Runner = r })
 	b := &blocker{}
 	svc := rcs.NewService(s, rcs.Config{Enabled: true}).SetBlocker(b)
-	s.OnInbound(func(from, text, id string) {
-		_, _ = svc.HandleInbound(context.Background(), rcs.Inbound{From: from, Text: text, MessageID: id})
+	s.OnInbound(func(from, text, id string) error {
+		_, err := svc.HandleInbound(context.Background(), rcs.Inbound{From: from, Text: text, MessageID: id})
+		return err
 	})
 	if _, err := s.PollInbound(context.Background()); err != nil {
 		t.Fatal(err)
@@ -160,8 +167,34 @@ func TestAContactNameChatIsSkippedNotMisattributed(t *testing.T) {
 	r := &pagesRunner{list: list, thread: readFile(t, "real_sms_thread.xml")}
 	s := newSender(newPhone(KindSMS), newClock(), func(c *Config) { c.Runner = r })
 	var n int
-	s.OnInbound(func(string, string, string) { n++ })
+	s.OnInbound(func(string, string, string) error { n++; return nil })
 	if _, err := s.PollInbound(context.Background()); err != nil || n != 0 || r.taps != 0 {
 		t.Fatalf("a saved contact's chat has no readable number and must be skipped: n=%d taps=%d err=%v", n, r.taps, err)
+	}
+}
+
+// A STOP whose opt-out failed to save must be read again on the next pass, not
+// marked delivered: before the fix the message key was set before the handler ran.
+func TestFailedInboundHandlerIsRetriedNextPass(t *testing.T) {
+	r := &pagesRunner{list: readFile(t, "real_conversation_list.xml"), thread: readFile(t, "real_sms_thread.xml")}
+	s := newSender(newPhone(KindSMS), newClock(), func(c *Config) { c.Runner = r })
+	calls := 0
+	s.OnInbound(func(from, text, id string) error {
+		calls++
+		if calls <= 2 { // the first pass: every message fails to save
+			return errors.New("database down")
+		}
+		return nil
+	})
+	ctx := context.Background()
+	if n, err := s.PollInbound(ctx); err != nil || n != 0 {
+		t.Fatalf("a failing handler delivers nothing: n=%d err=%v", n, err)
+	}
+	n, err := s.PollInbound(ctx)
+	if err != nil || n != 2 {
+		t.Fatalf("the next pass must retry both messages: n=%d err=%v calls=%d", n, err, calls)
+	}
+	if n, _ := s.PollInbound(ctx); n != 0 {
+		t.Fatalf("once handled they are not delivered again: n=%d", n)
 	}
 }

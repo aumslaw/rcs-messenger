@@ -78,8 +78,9 @@ func main() {
 			fmt.Printf("%-34s id=%-30q text=%-30q desc=%q\n", short(n.Class), n.ID(), n.Text, n.Desc)
 		}
 	case "inbound":
-		s.OnInbound(func(from, text, id string) {
+		s.OnInbound(func(from, text, id string) error {
 			fmt.Printf("incoming from %s: %q (%s) optOut=%v\n", from, text, id, rcs.IsOptOut(text))
+			return nil
 		})
 		n, err := s.PollInbound(ctx)
 		fatal(err)

@@ -20,6 +20,7 @@ const (
 )
 
 type Runner struct {
+	connMu sync.Mutex // serialises connect, disconnect, reconcile and Reload
 	store  *Store
 	sender *Sender
 	log    zerolog.Logger
@@ -58,6 +59,8 @@ func (r *Runner) Start(ctx context.Context, ldr leader.Checker) {
 }
 
 func (r *Runner) reconcile(ctx context.Context, ldr leader.Checker) {
+	r.connMu.Lock() // Reload and the reconcile ticker must never connect at once
+	defer r.connMu.Unlock()
 	shouldHold := ldr == nil || ldr.IsLeader()
 
 	r.mu.Lock()
@@ -112,14 +115,16 @@ func (r *Runner) connect(ctx context.Context) error {
 	}
 	agent.onInbound = r.onInbound
 
-	agent.cli = libgm.NewClient(ad, nil, r.log.With().Str("component", "libgm").Logger(), exhttp.ClientSettings{})
-	agent.cli.SetEventHandler(agent.handleEvent)
+	cli := libgm.NewClient(ad, nil, r.log.With().Str("component", "libgm").Logger(), exhttp.ClientSettings{})
+	agent.cli = cli
+	agent.authData = func() *libgm.AuthData { return cli.AuthData }
+	cli.SetEventHandler(agent.handleEvent)
 
 	connCtx := r.log.WithContext(context.Background())
-	if err := agent.cli.FetchConfig(connCtx); err != nil {
+	if err := cli.FetchConfig(connCtx); err != nil {
 		r.log.Warn().Err(err).Msg("rcs: fetching config failed, continuing")
 	}
-	if err := agent.cli.Connect(connCtx); err != nil {
+	if err := cli.Connect(connCtx); err != nil {
 		return err
 	}
 
@@ -153,6 +158,8 @@ func (r *Runner) disconnect() {
 }
 
 func (r *Runner) Reload(ctx context.Context) error {
+	r.connMu.Lock()
+	defer r.connMu.Unlock()
 	r.disconnect()
 	return r.connect(ctx)
 }

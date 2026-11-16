@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -203,12 +204,11 @@ func setupRCS(cfg config, conn *sql.DB) *rcsStack {
 
 	if android != nil {
 		// Incoming replies are read off the phone's screen; a STOP blocks the number.
-		android.OnInbound(func(from, text, messageID string) {
+		android.OnInbound(func(from, text, messageID string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if _, err := svc.HandleInbound(ctx, rcs.Inbound{From: from, Text: text, MessageID: messageID}); err != nil {
-				logg.Error().Err(err).Str("from", from).Msg("RCS inbound could not be handled")
-			}
+			_, err := svc.HandleInbound(ctx, rcs.Inbound{From: from, Text: text, MessageID: messageID})
+			return err
 		})
 	}
 	if runner != nil {
@@ -279,18 +279,45 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func envBool(key string, fallback bool) bool {
-	if v, err := strconv.ParseBool(env(key, "")); err == nil {
-		return v
+// parseBool and parseInt are the settings parsers. A variable that is set but
+// does not parse is an error, never the default: RCS_DRY_RUN=yes silently
+// becoming false would send real messages when a dry run was meant.
+func parseBool(key, raw string, fallback bool) (bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return fallback, nil
 	}
-	return fallback
+	v, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false, fmt.Errorf("%s=%q is not a boolean (use true or false)", key, raw)
+	}
+	return v, nil
+}
+
+func parseInt(key, raw string, fallback int) (int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return fallback, nil
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || v < 0 {
+		return 0, fmt.Errorf("%s=%q is not a non-negative whole number", key, raw)
+	}
+	return v, nil
+}
+
+func envBool(key string, fallback bool) bool {
+	v, err := parseBool(key, os.Getenv(key), fallback)
+	if err != nil {
+		logg.Fatal().Err(err).Msg("Invalid setting, refusing to start")
+	}
+	return v
 }
 
 func envInt(key string, fallback int) int {
-	if v, err := strconv.Atoi(env(key, "")); err == nil {
-		return v
+	v, err := parseInt(key, os.Getenv(key), fallback)
+	if err != nil {
+		logg.Fatal().Err(err).Msg("Invalid setting, refusing to start")
 	}
-	return fallback
+	return v
 }
 
 func envList(key string) []string {

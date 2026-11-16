@@ -33,3 +33,56 @@ Rule: send only when encrypted RCS is confirmed. Otherwise refuse. Never fall ba
 3. An SMS-only number is refused.
 4. Turn the recipient's data off mid-send: it must fail or be flagged, never go out as SMS silently.
 5. Fresh Google Messages contacts settle to `yes` within 15s. If not, raise `settleBudget`.
+
+---
+
+# Round 2 audit (2026-11-13): whole send path, both transports
+
+Four independent read-only reviews (service and API, web protocol, Android adb transport, reliability). Every
+finding below was checked against the code; the fixed ones have a test that fails on the old code.
+
+## Fixed
+
+| Severity | Finding | Fix | Test |
+|---|---|---|---|
+| CRITICAL | Android lock/banner patterns matched message text. A customer saying "is this end-to-end encrypted?", or any "End-to-end encrypted message" label, made a plain RCS chat read as encrypted. | Lock is a dedicated node matched by an anchored description ("Lock icon"); message bubbles and labels are never searched; the banner alone is never enough. | `TestMessageTextCannotMakeAPlainRCSChatLookEncrypted`, `TestRealShapedEncryptedChatReadsEncrypted` |
+| CRITICAL | A leftover draft hid the compose hint, and the banner alone then read as encrypted. | A box with no readable hint reads unknown; nothing is guessed from the thread. | `TestLeftoverDraftWithBannerIsNotEncrypted` |
+| HIGH | Android: an older identical message in the thread was taken for the new send ("sent" with the text still in the box). | A send counts only once the text has left the compose box. | `TestOldIdenticalMessageIsNotMistakenForOurSend` |
+| HIGH | Android: message text could set the status ("Payment failed" read as a failed send, so callers retried). | Bubbles and labels are excluded from the status search. | `TestMessageTextCannotSetTheSendStatus` |
+| HIGH | Android: the chat was not re-checked between settle and typing. | Eligibility is re-run on the read taken right before typing. | `TestChatThatDropsToPlainRCSAfterSettlingIsRefused` |
+| HIGH | Android: a caller disconnect after the tap returned a bare error: recorded as "nothing went out", no block, retry duplicates. | After the tap the send runs on an uncancelable context and always returns a result. | `TestCallerCancelAfterTheTapStillReturnsAResult` |
+| HIGH | Service: an outcome could fail to be recorded when the caller was gone, so an SMS fallback never blocked the number. | `record` writes on `context.WithoutCancel` with its own timeout. | `TestOutcomeIsRecordedEvenWhenTheCallerWentAway` |
+| HIGH | Android: a STOP whose opt-out failed to save was marked delivered and never retried. | The inbound handler returns an error; a message is marked delivered only after success, and a failed chat is re-read next pass. | `TestFailedInboundHandlerIsRetriedNextPass` |
+| HIGH | Web: capability `yes` was decided on Flag1 alone, so a non-Google-Messages contact could read as encrypted and be sent plain RCS. | `yes` only for the observed record `{1, 1, 0x0201}`. | `TestOnlyTheObservedGoogleMessagesRecordIsYes` |
+| HIGH | Web: an old encrypted tombstone was trusted without the current capability (contact moved to an iPhone). | A tombstone must be backed by capability `yes`; `no` refuses, anything else is `e2ee_pending`. | `TestEligibilityRequiresConfirmedEncryption` |
+| HIGH | Web: the phone accepted a send but reported no final status in the wait, and the result said "not sent": recorded FAILED, retried into a duplicate, an SMS fall back never flagged. Found by the simulation. | Result is sent with outcome unknown, and the chat is re-read after the send. | `TestSimNoFinalStatusWithinTheWaitIsSentOutcomeUnknown` |
+| MEDIUM | A mistyped setting silently fell back to its default (`RCS_DRY_RUN=yes` became false, so real sends). | Unparseable settings stop the server at startup. | `TestSettingsThatDoNotParseAreErrorsNotDefaults` |
+
+## Fixed in the final pass
+
+| Sev | Problem | Fix | Test |
+|---|---|---|---|
+| HIGH | Web: a send request that errored after it left (timeout, dropped connection) was reported as an error, so a caller retried into a duplicate. | The thread is re-read for the send's id. Found or unreadable: sent, outcome unknown, and the chat is re-checked. Only a readable thread without the message counts as not sent. | `TestSimSendRequestErrorThatLandedIsSentOutcomeUnknown`, `...UnreadableThreadIsSentOutcomeUnknown`, `...DidNotLandIsAnErrorNotASend` |
+| HIGH | Web: a lost session (unpaired, fatal connection error, disconnected, logged out) did not stop a send. | `web_session_lost` refusal before anything else; nothing reaches the client. | `TestSimLostWebSessionRefusesWithoutSending` |
+| MEDIUM | `SUCCESS_UNVERIFIED` did not block the number. | It blocks like the SMS and unencrypted outcomes. | `TestClassify` (blocks list) |
+| n/a | "`Reload` can race the reconcile loop" was stale: both already take `connMu`. | No change needed. | |
+
+## Found, not fixed (decide before relying on it)
+
+- **A 30 s HTTP write timeout is shorter than a long send.** The caller may give up while the send still finishes and is recorded; a retry by the caller is then a new send. Needs an idempotency key from the caller.
+- **Android:** split-screen windows break the "which side is ours" test; inbound STOP is skipped for chats saved under a contact name, and message ids repeat when identical text scrolls off.
+- **Logs may still contain phone numbers** outside adb errors (those are now masked). All endpoints are unauthenticated (bind 127.0.0.1).
+
+## Added after live runs (same day)
+
+- **The send button is the final gate** (`Send encrypted message`, real phone). The thread-start "Lock icon" scrolls away on long threads, so it is only a pre-typing hint; see docs/ANDROID.md. Test: `TestSendButtonThatIsNotEncryptedIsTheFinalGate`, `TestLongThreadIsRecognisedByTheAppsMessageLabel`.
+- **Portrait is enforced by the sender** (`KeepAwake`): in landscape the keyboard goes full screen and the send tap misses.
+- **Root cause of "friend's text arrives as SMS" on the test phone:** the phone had no validated data connection, so RCS could not register.
+
+## Web path: simulated, not run live
+
+`internal/providers/rcsphone/sim_test.go` runs `Agent.Send` against a scripted fake Google Messages client (`fake_test.go`, behind the small `gmClient` interface): every refusal case asserts `SendMessage` was never called, plus the send, failure, cancelled-caller, serialised-send and fresh-chat-becomes-encrypted cases. Breaking the rules on purpose (fresh chat on capability alone, old marker without capability, XMS allowed, no send lock, unknown outcome as not-sent) makes those tests fail. Not proven: that the real phone replies in these shapes, and the libgm wire and auth. That needs a paired session.
+
+## Still to prove on the phone
+
+The live send into an encrypted chat and the Sent/Delivered wording of a message we send. Typed-text state: whether the padlock node is still present while text is in the box (the code does not rely on it).

@@ -63,6 +63,25 @@ func TestParseCapabilityReadsTheObservedShapes(t *testing.T) {
 	}
 }
 
+// Flag1 alone must not read as yes. A contact on carrier RCS without Google
+// Messages could set it with another version, and "yes" sends plain RCS to them.
+func TestOnlyTheObservedGoogleMessagesRecordIsYes(t *testing.T) {
+	for name, c := range map[string]*Capability{
+		"flag1 only":             {Flag1: 1},
+		"flag1 other version":    {Flag1: 1, Flag2: 1, Version: "0x0301"},
+		"flag1 flag2 0":          {Flag1: 1, Flag2: 0, Version: "0x0201"},
+		"flag1 no version":       {Flag1: 1, Flag2: 1},
+		"flag1 with sms version": {Flag1: 1, Flag2: 1, Version: "0x01"},
+	} {
+		if got := c.State(); got == CapabilityYes {
+			t.Errorf("%s must not read as yes, got %s", name, got)
+		}
+	}
+	if got := (&Capability{Flag1: 1, Flag2: 1, Version: "0x0201"}).State(); got != CapabilityYes {
+		t.Errorf("the observed Google Messages record must still be yes, got %s", got)
+	}
+}
+
 func TestParseCapabilityIsNilWithoutTheField(t *testing.T) {
 	if got := parseCapability(&gmproto.GetConversationTypeResponse{Type: 2}); got != nil {
 		t.Errorf("no field 8, want nil, got %+v", got)

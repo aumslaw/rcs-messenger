@@ -2,6 +2,7 @@ package rcs
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -25,12 +26,17 @@ var optOutWords = map[string]bool{
 	"revoke":      true,
 }
 
+// optOutPhrase catches the natural ways people say it: "please stop", "stop
+// texting me", "unsubscribe me". Anchored on both ends so a sentence that merely
+// contains the word ("can you stop by tomorrow") is not an opt-out.
+var optOutPhrase = regexp.MustCompile(`^(?:(?:please|pls|plz) )?(?:stop|unsubscribe|cancel|quit|end)(?: (?:all|texting|texts|text|messaging|messages|sending|contacting|me|us|now|please|pls|plz))*$`)
+
 func IsOptOut(text string) bool {
 	cleaned := strings.TrimFunc(strings.ToLower(strings.TrimSpace(text)), func(r rune) bool {
 		return unicode.IsPunct(r) || unicode.IsSpace(r)
 	})
 	cleaned = strings.Join(strings.Fields(cleaned), " ")
-	return optOutWords[cleaned]
+	return optOutWords[cleaned] || optOutPhrase.MatchString(cleaned)
 }
 
 type Inbound struct {

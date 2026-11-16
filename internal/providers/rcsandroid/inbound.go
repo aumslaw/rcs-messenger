@@ -15,7 +15,7 @@ import (
 
 // InboundFunc receives one incoming message: the sender's E.164 number, the
 // text, and an id that is the same every time the same message is read.
-type InboundFunc func(from, text, messageID string)
+type InboundFunc func(from, text, messageID string) error
 
 // ConvRow is one chat on the conversation list.
 type ConvRow struct {
@@ -180,20 +180,32 @@ func (s *Sender) PollInbound(ctx context.Context) (int, error) {
 			return delivered, err
 		}
 		seen := map[string]int{}
+		failed := false
 		for _, text := range s.dev.m.IncomingMessages(thread) {
 			k := norm(text)
 			seen[k]++
 			id := messageKey(number, text, seen[k])
 			s.in.mu.Lock()
 			done := s.in.messages[id]
+			s.in.mu.Unlock()
+			if done {
+				continue
+			}
+			// Marked delivered only after the handler succeeded: a STOP whose
+			// opt-out failed to save must be read again on the next pass.
+			if err := fn(number, text, id); err != nil {
+				failed = true
+				logg.Error().Err(err).Msg("Android inbound message could not be handled; will retry on the next pass")
+				continue
+			}
+			s.in.mu.Lock()
 			s.in.messages[id] = true
 			s.in.mu.Unlock()
-			if !done {
-				fn(number, text, id)
-				delivered++
-			}
+			delivered++
 		}
-		s.remember(row)
+		if !failed { // a failed chat is looked at again next pass
+			s.remember(row)
+		}
 		_ = s.dev.Key(ctx, "KEYCODE_BACK")
 		if err := s.cfg.Sleep(ctx, s.cfg.PollEvery/2); err != nil {
 			return delivered, err

@@ -30,7 +30,11 @@ const (
 
 // Blocks reports whether a number with this outcome on record is one we do
 // not auto-send to again.
-func (o Outcome) Blocks() bool { return o == OutcomeSuccessRCS || o == OutcomeSuccessSMS }
+// An unverified send blocks too: the number was sent to and its encryption
+// could not be re-checked, so nothing says it is safe to send again.
+func (o Outcome) Blocks() bool {
+	return o == OutcomeSuccessRCS || o == OutcomeSuccessSMS || o == OutcomeUnverified
+}
 
 type SendRecord struct {
 	ID             int64   `json:"id"`

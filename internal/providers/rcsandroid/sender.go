@@ -217,6 +217,9 @@ func (s *Sender) Send(ctx context.Context, to, message string, opts rcsdirect.Se
 		}
 		return nil, err
 	}
+	if !s.dev.HasInternet(ctx) {
+		return nil, s.refused(ReasonPhoneOffline, nil)
+	}
 	if err := s.dev.OpenChat(ctx, to); err != nil {
 		return nil, err
 	}
@@ -233,13 +236,24 @@ func (s *Sender) Send(ctx context.Context, to, message string, opts rcsdirect.Se
 	}
 
 	// 2. Type it and prove it landed in the box exactly, before pressing send.
-	_, scr, err := s.read(ctx)
+	pre, scr, err := s.read(ctx)
 	if err != nil {
 		return nil, err
 	}
 	box, ok := s.dev.m.compose(scr)
 	if !ok {
 		return nil, s.refused(ReasonChatNotOpen, chk)
+	}
+	// The title bar must show the number we mean to text. A leftover task or a
+	// failed open must never type into someone else's chat.
+	if h := s.dev.m.headerNumber(scr); h != "" && !sameNumber(h, to) {
+		return nil, s.refused(ReasonWrongChat, chk)
+	}
+	// The settle read can be seconds old. Confirm encrypted again on the read
+	// taken right before typing: a chat that dropped back is refused here.
+	if okNow, why := eligibility(pre); !okNow {
+		_ = s.dev.ClearCompose(ctx)
+		return nil, s.refused(why, toCheck(to, pre, true))
 	}
 	x, y := box.Bounds.Center()
 	if err := s.dev.Tap(ctx, x, y); err != nil {
@@ -273,12 +287,28 @@ func (s *Sender) Send(ctx context.Context, to, message string, opts rcsdirect.Se
 		return nil, s.refused(ReasonNotE2EE, bad)
 	}
 
+	// The final gate. Everything above is a prediction; the send button is the
+	// app's own statement of what THIS send will be. On a real phone it reads
+	// "Send encrypted message" for an encrypted chat and "Send SMS" for SMS.
+	// Anything else (plain RCS, an unknown label, a layout we do not know) is a
+	// refusal, and the typed text is cleared.
+	if !s.dev.m.sendEnc.MatchString(norm(btn.Desc)) {
+		_ = s.dev.ClearCompose(ctx)
+		bad := toCheck(to, ChatView{Kind: KindRCS, ComposeFound: true, Evidence: `send button says "` + norm(btn.Desc) + `", not "Send encrypted message"`}, false)
+		return nil, s.refused(ReasonE2EEPending, bad)
+	}
+
 	// 3. Send, then watch the thread for the status.
 	bx, by := btn.Bounds.Center()
-	if err := s.dev.Tap(ctx, bx, by); err != nil {
-		return nil, err
+	// From the tap on, the message may already be out. Nothing below may return
+	// a bare error or stop on the caller's cancellation: the outcome has to be
+	// read and recorded, or the number is never blocked and a retry duplicates.
+	tapErr := s.dev.Tap(ctx, bx, by)
+	if tapErr != nil {
+		logg.Error().Err(tapErr).Str("to", to).Msg("Android send tap returned an error; reading the thread to see whether it went")
 	}
 	s.last = s.cfg.Now()
+	ctx = context.WithoutCancel(ctx)
 
 	res := &rcsdirect.SendResult{Check: chk, TmpID: fmt.Sprintf("android-%d", s.last.UnixMilli())}
 	seen := map[SendStatus]bool{}
@@ -288,10 +318,19 @@ func (s *Sender) Send(ctx context.Context, to, message string, opts rcsdirect.Se
 	var raw string
 	proto := KindUnknown // what the sent message itself says it went out as
 	for {
-		_, scr, err = s.read(ctx)
+		var cv ChatView
+		cv, scr, err = s.read(ctx)
 		if err == nil {
 			sm := s.dev.m.ReadSend(scr, message)
 			found, st, raw = sm.Found, sm.Status, sm.Raw
+			// The send only counts as registered once the text has left the
+			// compose box. A thread can already hold an identical older
+			// message (a repeat send), so a matching bubble alone proves
+			// nothing: that is how an unsent message once read as sent.
+			if cv.ComposeFound && norm(cv.ComposeText) == norm(message) {
+				found, st, raw = false, StatusNone, ""
+				sm.Protocol = KindUnknown
+			}
 			if sm.Protocol != KindUnknown {
 				proto = sm.Protocol
 			}
@@ -307,7 +346,7 @@ func (s *Sender) Send(ctx context.Context, to, message string, opts rcsdirect.Se
 			break
 		}
 		if err := s.cfg.Sleep(ctx, s.cfg.PollEvery); err != nil {
-			return nil, err
+			break // cannot happen with an uncancelable ctx; never return an error after the tap
 		}
 	}
 	switch {
@@ -429,7 +468,8 @@ func (s *Sender) Health(ctx context.Context) (*rcsdirect.Health, error) {
 			h := *s.health
 			return &h, nil
 		}
-		return &rcsdirect.Health{LoggedIn: true, Connected: true, PhoneResponding: true, SessionActive: true}, nil
+		// Busy with a send and never read: say so instead of claiming ready.
+		return &rcsdirect.Health{LastError: "busy, no reading yet"}, nil
 	}
 	defer s.mu.Unlock()
 
@@ -457,6 +497,10 @@ func (s *Sender) Health(ctx context.Context) (*rcsdirect.Health, error) {
 	}
 	if !info.SimReady {
 		problems = append(problems, "no SIM is ready")
+	}
+	if !s.dev.HasInternet(ctx) {
+		problems = append(problems, "no working internet: RCS cannot send until Wi-Fi or mobile data is validated")
+		h.SessionActive = false
 	}
 	h.LastError = strings.Join(problems, "; ")
 	// Whether RCS itself is on is only known per chat, from the screen; a
